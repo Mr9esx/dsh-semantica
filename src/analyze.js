@@ -2,47 +2,47 @@
 //
 // 「让 AI 分析这张图」的宿主半侧。
 //
-// 做法不是把图塞进当前对话，而是**新开一个子会话** —— 相当于 DSH 的 Side Chat
-// 那一套：插件自己调 `ctx.get('agents').create()` 建一个带自定义 seed 的子会话，
-// 再把 Semantica 抽好的数据注入进去。子会话出现在侧边栏「子会话」页签里，
-// 用户能读、能继续追问，而且不会污染当前这轮对话。
+// 做法不是把图塞进当前对话（那会永久占住上下文，之后每一轮都背着它），而是
+// **新开一条对话**，把 Semantica 抽好的数据注入进去。用户能读、能继续追问，
+// 而且不会污染当前这一轮。
 //
-// 这个接缝是 DSH 官方的（`context-types.ts` 原文）：
-//   "Create a session + agent with a custom seed — the Side Chat thread-creation
-//    seam: the SAME public seam api-proxy's session.fork and the subagent fork
-//    provider use."
+// ## 走 sessionController，不走 agents.create
 //
-// ## 为什么不继承父会话历史（和 Side Chat 的关键差别）
+// 这里用 `ctx.get('sessionController')` —— 也就是 GUI 自己「新建对话」用的那条
+// 路径（`SessionController` 的服务名就是 `sessionController`）：
 //
-// Side Chat 的 seed 是**父会话的完整事件日志**，因此必须处理「父会话正在跑、
-// turn 没闭合」—— 它要合成 `step/end` + `turn/end{reason:'interrupted'}` 把
-// 那半轮冻住，还要处理「工具调用没有配对 result」这种连冻都冻不干净的情况。
-// 那套逻辑很长，而且很容易出边界 bug。
+//   create({ workspaceId | cwd })      → 建一个空会话，返回 { sessionId }
+//   selectModel({ sessionId, ... })    → 给它选上模型
+//   prompt({ sessionId, content })     → 发第一条用户消息（内部 agent.followup）
 //
-// 我们**不继承历史**：用户是在对话进行到一半时点按钮的，父会话必然是 mid-turn，
-// 而 digest 里已经带了决策、轮次、时间线。所以 seed 只放一个
-// `subagent/descriptor` 事件就够了 —— 整个 open-turn 问题不复存在。
+// **为什么不用 `agents.create()`**：那是子代理（subagent）的接缝。用它必须传
+// `meta.origin:'subagent'` + `parentSession`，建出来的东西会出现在侧边栏「子会话」
+// 页签里、被 SubagentView 按父子关系归类，而且得自己造 seed（`subagent/descriptor`
+// 事件，还带一个钉死的描述符版本号）。用户要的是「直接开新对话」，所以换成
+// sessionController —— 它建出来的就是一条普通会话，出现在会话列表里。
 //
-// 代价：子会话不知道对话原文，只知道图。这对「分析图」这个目的足够了。
+// workspace 那一步不能省：`create()` 只在传了 `workspaceId` 时才 `attachSession()`，
+// 而 GUI 的会话列表是**按 workspace 分组**的（客户端就是
+// `workspaces.find(w => w.sessionIds.includes(id))`）。不挂进去，新对话建了也找不到。
 //
 // ## 注入为什么是两条消息
 //
 // `agent.inject()` 送到的是**排队中的模型可见上下文**，它不唤醒驱动；
-// `agent.followup()` 才是唤醒驱动的那条。Side Chat 用这个组合是为了让日志里
-// 留下两条 `user/message`：注入那条 source 标 `kind:'plugin'`，UI 把它折叠成
-// 一行 context，用户的问题才是正常气泡。合成一条的话，几 KB 的图数据会整个
-// 糊在用户气泡里。
+// `prompt()` 走的是 `agent.followup()`，那才是唤醒驱动的一条。
+//
+// 拆开是为了让日志里留下两条 `user/message`：注入那条 source 标 `kind:'plugin'`，
+// UI 把它折叠成一行 context；提问才是正常的用户气泡。合成一条的话，几 KB 的图
+// 数据会整个糊在用户气泡里。
 
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 
-// ## 为什么不 import `@deepseek-ai/dsh-llm` / `dsh-subagent`
+// ## 为什么不 import `@deepseek-ai/dsh-llm`
 //
-// 上游这两处是这样的：
-//     createUserMessage(input) = deepFreeze(structuredClone({...input, role:'user', id: MessageId(randomUUID())}))
+// `createUserMessage` 上游是这么实现的：
+//     createMessage(input) = deepFreeze(structuredClone({...input, id: MessageId(randomUUID())}))
 //     MessageId(id) { return id }          // 品牌函数，零校验
-//     snapshotSubagentDescriptor(x) = snapshotJsonValue({version:3, mode, provider, label, ...})
-// 都是纯函数，手写完全等价，所以下面直接构造。
+// 纯函数，手写完全等价，所以下面直接构造那个对象。
 //
 // 之所以不 import，是因为**我们插件是 link: 安装的**：真实路径在
 // ~/Downloads/dsh-semantica-graph，而 `profiles/web/node_modules/dsh-semantica-graph`
@@ -51,14 +51,7 @@ import { readFileSync } from 'node:fs'
 // `$DSH_HOME/profiles/node_modules/@deepseek-ai/*`。
 //
 // 这个失败模式极不对称：import 解析不了 = 整个插件加载失败，`apply` 压根不执行，
-// 用户的图谱功能会一起挂掉。而手写对象最坏只是描述符版本对不上（子会话被标成
-// `corrupt`），不影响主功能。所以这里选零依赖。
-//
-// 代价：`DESCRIPTOR_VERSION` 是钉死的。DSH 升级如果改了描述符版本，需要同步改这里。
-// 上游定义在 `@deepseek-ai/dsh-subagent` 的 `snapshotSubagentDescriptor`。
-
-/** 子会话描述符的版本号（对应上游 `SUBAGENT_DESCRIPTOR_VERSION`）。 */
-const DESCRIPTOR_VERSION = 3
+// 用户的图谱功能会一起挂掉。而手写对象最坏只是消息少个字段，不影响主功能。
 
 /**
  * 造一条 user 消息。等价于 `@deepseek-ai/dsh-llm` 的 `createUserMessage` ——
@@ -68,14 +61,11 @@ function userMessage({ content, source }) {
   return { id: randomUUID(), role: 'user', content, source }
 }
 
-/** 子会话在侧边栏「子会话」页签里的标签前缀。 */
+/** 新对话的标签前缀（只用于面板上那行提示）。 */
 export const ANALYSIS_LABEL_PREFIX = 'Semantica: '
 
 /** digest 的长度上限。图可以很大，但注入的文本必须有天花板。 */
 const MAX_DIGEST_CHARS = 24000
-
-/** 子会话创建的等待上限。和 Side Chat 一样给足，冷启动要挂 preset。 */
-const CREATE_TIMEOUT_MS = 20000
 
 /** 决策全量注入的上限（正常对话不会到）。 */
 const MAX_DECISIONS = 60
@@ -392,137 +382,186 @@ export function buildDigest(graph, meta = {}) {
  *
  * `seq` 从 0 开始、不含任何未闭合 turn —— 满足 seed 的合法性约束。
  */
-export function buildSeed({ provider, label, agentProvider, agentModel }) {
-  // 与上游 `snapshotSubagentDescriptor` 的输出逐字段一致。
-  // `one-shot` 模式下不带 label，我们是 `continuable`，label 必填。
-  const descriptor = {
-    version: DESCRIPTOR_VERSION,
-    mode: 'continuable',
-    provider,
-    label,
-    ...(agentProvider === undefined ? {} : { agentProvider }),
-    ...(agentModel === undefined ? {} : { agentModel }),
+/**
+ * 找到父会话所属的 workspace。
+ *
+ * 这一步不能省：`sessionController.create()` 只在传了 `workspaceId` 时才
+ * `attachSession()`，而 GUI 的会话列表是**按 workspace 分组的**（客户端代码里
+ * 就是 `workspaces.find(w => w.sessionIds.includes(id))`）。不挂进去，「新对话」
+ * 建了也在侧边栏里找不到。
+ *
+ * 先按 sessionIds 精确找，退而求其次按 cwd 匹配 workspace 路径。
+ */
+function findWorkspace(ctx, parentSessionId, cwd) {
+  const reg = ctx.get('workspaceRegistry')
+  if (!reg) return undefined
+  try {
+    if (typeof reg.list === 'function') {
+      for (const w of reg.list() || []) {
+        if (Array.isArray(w?.sessionIds) && w.sessionIds.includes(parentSessionId)) return w
+      }
+    }
+    if (cwd && typeof reg.resolveByPath === 'function') {
+      return reg.resolveByPath(cwd) ?? undefined
+    }
+  } catch (err) {
+    ctx.logger?.debug?.(`[semantica-graph] 找不到父会话的 workspace: ${err?.message ?? err}`)
   }
-  return [
-    {
-      type: 'subagent/descriptor',
-      seq: 0,
-      time: Date.now(),
-      data: descriptor,
-    },
-  ]
+  return undefined
 }
 
 /**
- * 建子会话并把图数据注入进去。
+ * 开一个**新的顶层对话**，把图数据注入进去。
+ *
+ * 走的是 `sessionController` —— 也就是 GUI 自己「新建对话」用的那套：
+ *
+ *   create({ workspaceId | cwd })  → 建一个空会话，返回 { sessionId }
+ *   selectModel({ sessionId, provider, model })  → 给它选上模型
+ *   prompt({ sessionId, content })  → 发第一条用户消息（内部 agent.followup）
+ *
+ * 早先这里用的是 `agents.create({ meta: { origin:'subagent', parentSession } })`，
+ * 那建出来的是**子代理**：会出现在侧边栏「子会话」页签里、被 SubagentView 按
+ * 父子关系归类。用户要的是「直接开新对话」，所以换成这条路径 ——
+ * 它建出来的就是一条普通会话，出现在会话列表里。
+ *
+ * digest 仍然走 `agent.inject()`（source 标 plugin），这样它在 UI 里是折叠的
+ * 背景行，而不是一条几 KB 的用户气泡；提问走 `prompt()`，是正常的用户消息。
  *
  * 全部依赖软获取（`ctx.get`），任何一环缺失都返回结构化错误而不是抛异常 ——
  * host 半侧的 inject 是空数组，硬依赖会让插件整个加载不起来。
  *
- * @returns {Promise<{ok: true, childId: string, label: string, digestChars: number}
- *                 | {ok: false, code: string, error: string}>}
+ * @returns {Promise<{ok: true, sessionId: string, label: string, digestChars: number, injected: boolean}
+ *                 | {ok: false, code: string, error: string, sessionId?: string}>}
  */
-export async function createAnalysisSession(ctx, { sessionId, kind, digest, label, provider = 'semantica-graph' }) {
+export async function createAnalysisSession(ctx, { sessionId, kind, digest, label }) {
   const spec = ANALYSIS_KINDS[kind]
   if (!spec) return { ok: false, code: 'unknown-kind', error: `未知的分析类型：${kind}` }
 
-  const agents = ctx.get('agents')
-  if (!agents || typeof agents.create !== 'function') {
+  const sc = ctx.get('sessionController')
+  if (!sc || typeof sc.create !== 'function' || typeof sc.prompt !== 'function') {
     return {
       ok: false,
-      code: 'agents-unavailable',
-      error: '当前环境没有 agents 服务，无法创建子会话',
+      code: 'session-controller-unavailable',
+      error: '当前环境没有 sessionController 服务，无法新建对话',
     }
   }
 
-  // 父会话必须活着：agentOptions 要从它身上继承 provider / model，
-  // 而且 preset 也要按它的来挂 —— 否则子会话会缺工具。
-  const parent = typeof agents.get === 'function' ? agents.get(sessionId) : undefined
+  // 父会话：拿 cwd、preset 和模型选择。它必须活着 —— 我们靠它继承这些。
+  const agents = ctx.get('agents')
+  const parent = agents && typeof agents.get === 'function' ? agents.get(sessionId) : undefined
   if (!parent) {
     return {
       ok: false,
       code: 'parent-not-live',
-      error: `会话 ${sessionId} 当前没有在运行，无法继承模型与工具配置`,
+      error: `会话 ${sessionId} 当前没有在运行，无法继承工作目录与模型`,
     }
   }
 
   const parentSession = parent.session
-  const childId = `session-${randomUUID()}`
+  const cwd = parentSession?.header?.cwd
+  const provider = parent.options?.provider
+  const model = parent.options?.model
+  const reasoningEffort = parent.options?.reasoningEffort
+  const agentPreset = parentSession?.header?.agentPreset
+  const workspace = findWorkspace(ctx, sessionId, cwd)
 
-  // preset：解析父会话用的那个，挂到子会话上。拿不到就退化成空 setup ——
-  // 子会话仍然能建起来，只是工具集是默认的。
-  let agentPreset
-  let setup = () => Promise.resolve()
-  const presets = ctx.get('agentPresets')
-  if (presets && typeof presets.resolve === 'function' && typeof presets.mount === 'function') {
+  // 1) 建新对话。workspaceId 与 cwd 互斥（controller 会直接 bad-request）：
+  //    能拿到 workspace 就优先用它，这样会话会挂进侧边栏的会话列表；
+  //    拿不到才退回 cwd。
+  //
+  //    传 workspaceId 时 controller 会用 `workspace.path` 当 cwd，随后
+  //    `attachSession()` 会拿它在磁盘上 realpath 校验一遍（必须存在、是目录、
+  //    与 workspace 路径一致）。校验不过就会抛错，那样**一条对话都建不出来** ——
+  //    所以这里退回 cwd 再试一次：会话仍然可用，只是不会出现在侧边栏列表里，
+  //    比整个失败强。
+  const workspaceId = workspace?.id ?? workspace?.workspaceId
+  const targets = []
+  if (typeof workspaceId === 'string' && workspaceId) {
+    targets.push({ workspaceId })
+    if (cwd !== undefined) targets.push({ cwd })
+  } else if (cwd !== undefined) {
+    targets.push({ cwd })
+  } else {
+    targets.push({})
+  }
+
+  let newId
+  let lastError
+  for (const target of targets) {
     try {
-      const resolved = await presets.resolve(parentSession?.header?.agentPreset)
-      agentPreset = resolved?.id
-      if (agentPreset !== undefined) {
-        setup = async (agentCtx) => {
-          await presets.mount(agentCtx, agentPreset)
+      const created = await sc.create({
+        ...target,
+        ...(agentPreset === undefined ? {} : { agentPreset }),
+      })
+      newId = created?.sessionId
+      if (typeof newId === 'string' && newId) {
+        if (target.workspaceId === undefined && targets.length > 1) {
+          ctx.logger?.warn?.(
+            '[semantica-graph] 挂到 workspace 失败，新对话已建在 cwd 上但不会出现在侧边栏列表里',
+          )
         }
+        break
       }
+      lastError = 'sessionController.create 没有返回 sessionId'
     } catch (err) {
-      ctx.logger?.warn?.(`[semantica-graph] preset 解析失败，子会话用默认工具集: ${err?.message ?? err}`)
+      lastError = err?.message ?? err
     }
   }
 
-  const seed = buildSeed({
-    provider,
-    label,
-    agentProvider: parent.options?.provider,
-    agentModel: parent.options?.model,
-  })
+  if (typeof newId !== 'string' || !newId) {
+    return { ok: false, code: 'create-failed', error: `新对话创建失败：${lastError}` }
+  }
 
-  let handle
+  // 2) 选模型。新会话还没有任何模型选择，不选的话 prompt 会以
+  //    `model-unavailable: no adapter serves provider "..."` 直接拒绝。
+  if (provider && model && typeof sc.selectModel === 'function') {
+    try {
+      await sc.selectModel({
+        sessionId: newId,
+        provider,
+        model,
+        ...(reasoningEffort === undefined ? {} : { reasoningEffort }),
+      })
+    } catch (err) {
+      // 选不上不致命：会话本身可能是从设置里继承了默认模型
+      ctx.logger?.warn?.(`[semantica-graph] 给新对话选模型失败，用默认值: ${err?.message ?? err}`)
+    }
+  }
+
+  // 3) 背景数据走 inject —— 不唤醒驱动，且 UI 把它折叠成一行 context。
+  //    拿不到 agent 也不致命，只是图数据会缺席。
+  let injected = false
   try {
-    handle = await agents.create({
-      sessionId: childId,
-      meta: {
-        ...(parentSession?.header?.cwd === undefined ? {} : { cwd: parentSession.header.cwd }),
-        parentSession: parentSession?.id ?? sessionId,
-        seedLength: seed.length,
-        origin: 'subagent',
-        delegationDepth: (parentSession?.header?.delegationDepth ?? 0) + 1,
-        ...(agentPreset === undefined ? {} : { agentPreset }),
-      },
-      seed,
-      agentOptions: { ...(parent.options || {}) },
-      setup,
-      signal: AbortSignal.timeout(CREATE_TIMEOUT_MS),
+    const agent = agents && typeof agents.get === 'function' ? agents.get(newId) : undefined
+    if (agent && typeof agent.inject === 'function') {
+      agent.inject(
+        userMessage({
+          content: [{ type: 'text', text: digest }],
+          source: { kind: 'plugin', plugin: 'dsh-semantica-graph' },
+        }),
+      )
+      injected = true
+    } else {
+      ctx.logger?.warn?.('[semantica-graph] 新对话的 agent 还不可用，图数据没有注入')
+    }
+  } catch (err) {
+    ctx.logger?.warn?.(`[semantica-graph] 注入图数据失败: ${err?.message ?? err}`)
+  }
+
+  // 4) 提问走 prompt —— 这条才是唤醒驱动的用户消息。
+  try {
+    await sc.prompt({
+      sessionId: newId,
+      content: [{ type: 'text', text: spec.prompt }],
     })
   } catch (err) {
     return {
       ok: false,
-      code: 'create-failed',
-      error: `子会话创建失败：${err?.message ?? err}`,
+      code: 'prompt-failed',
+      error: `对话已建好但提问失败：${err?.message ?? err}`,
+      sessionId: newId,
     }
   }
 
-  // 两条消息，顺序不能反：先 inject 背景，再 followup 提问。
-  // inject 不唤醒驱动、排在下一步最先被取走，所以模型看到的是「背景 → 问题」。
-  try {
-    handle.agent.inject(
-      userMessage({
-        content: [{ type: 'text', text: digest }],
-        source: { kind: 'plugin', plugin: 'dsh-semantica-graph' },
-      }),
-    )
-    handle.agent.followup(
-      userMessage({
-        content: [{ type: 'text', text: spec.prompt }],
-        source: { kind: 'user' },
-      }),
-    )
-  } catch (err) {
-    return {
-      ok: false,
-      code: 'inject-failed',
-      error: `子会话已创建（${childId}），但注入失败：${err?.message ?? err}`,
-      childId,
-    }
-  }
-
-  return { ok: true, childId, label, digestChars: digest.length }
+  return { ok: true, sessionId: newId, label, digestChars: digest.length, injected }
 }

@@ -89,13 +89,15 @@ window.__ModuleLoader__.load({
 			"note.explorer": "上游 Explorer",
 			"analyze.title": "让 AI 分析",
 			"analyze.hint":
-				"新开一个子会话，把这张图的数据注入进去让 AI 分析。子会话在侧边栏「子会话」页签里，可以继续追问。",
+				"新开一个对话，把这张图的数据注入进去让 AI 分析。新对话会出现在会话列表里，可以继续追问。",
 			"analyze.retro": "复盘这次对话",
 			"analyze.structure": "理解图数据",
 			"analyze.quality": "检验抽取质量",
 			"analyze.advice": "给当前任务的建议",
-			"analyze.working": "正在开子会话…",
-			"analyze.done": "已开子会话，去侧边栏「子会话」页签看：",
+			"analyze.working": "正在开新对话…",
+			"analyze.done": "已开新对话：",
+			"analyze.manual": "没能自动切过去，去会话列表里找它就行。",
+			"analyze.noDigest": "图数据没能注入，这个对话只有提问。",
 			"analyze.noDrill": "图服务没起来，这次只能基于静态摘要分析。",
 			"analyze.needPrepare": "请先点「重新抽取」把图建出来。",
 		};
@@ -131,13 +133,15 @@ window.__ModuleLoader__.load({
 			"note.explorer": "Upstream Explorer",
 			"analyze.title": "Ask an AI to analyse",
 			"analyze.hint":
-				"Opens a child conversation seeded with this graph, so an AI can analyse it. The child lives in the sidebar's Subagents tab and accepts follow-ups.",
+				"Opens a new conversation seeded with this graph, so an AI can analyse it. It shows up in the session list and accepts follow-ups.",
 			"analyze.retro": "Review this conversation",
 			"analyze.structure": "Understand the graph",
 			"analyze.quality": "Check extraction quality",
 			"analyze.advice": "Advise on my current task",
-			"analyze.working": "Opening the child conversation…",
-			"analyze.done": "Child conversation created — see the Subagents tab:",
+			"analyze.working": "Opening a new conversation…",
+			"analyze.done": "New conversation created:",
+			"analyze.manual": "Could not switch to it automatically — find it in the session list.",
+			"analyze.noDigest": "The graph data could not be injected; this conversation has only the question.",
 			"analyze.noDrill": "The graph service is not running, so this run is summary-only.",
 			"analyze.needPrepare": "Press “Re-extract” first to build the graph.",
 		};
@@ -257,10 +261,10 @@ window.__ModuleLoader__.load({
 		 * 让宿主新开一个子会话，把图数据注进去让 AI 分析。
 		 *
 		 * kind 是四种分析之一：retro / structure / quality / advice。
-		 * 返回 `{ ok:true, childId, label, digestChars, drillable }`，
+		 * 返回 `{ ok:true, sessionId, label, digestChars, injected, drillable }`，
 		 * 失败时 `ok:false` 且带 code —— 宿主侧的 code 有
-		 * agents-unavailable / parent-not-live / create-failed / inject-failed
-		 * / graph-missing / unknown-kind，以及 prepare 那一串。
+		 * session-controller-unavailable / parent-not-live / create-failed
+		 * / prompt-failed / graph-missing / unknown-kind，以及 prepare 那一串。
 		 */
 		function analyze(sessionId, kind) {
 			return postJson("/api-semantica/analyze", { sessionId, kind });
@@ -293,6 +297,30 @@ window.__ModuleLoader__.load({
 				// 畸形 url：退化成只按会话去重，至少不会每次都新开标签
 			}
 			return `${sessionId}@${port}`;
+		}
+
+		// ─────────────────── 跳到某个会话（新对话用） ───────────────────
+
+		/**
+		 * sessions 服务句柄。走延迟注入（`ctx.inject(["sessions"], …)`）而不是
+		 * 写进 `inject` 数组 —— 后者是硬依赖，服务缺席时整个插件加载不起来。
+		 * 参考 `dsh-client-ui-workflow-run` 的用法，官方就是 `ctx.sessions.open(id)`。
+		 */
+		let sessionsSvc = null;
+
+		/**
+		 * 把界面切到某个会话。成功返回 true。
+		 * 失败只是不跳转，不影响已经建好的对话 —— 用户自己在列表里也能找到。
+		 */
+		function openSession(id) {
+			if (!sessionsSvc || typeof sessionsSvc.open !== "function") return false;
+			try {
+				sessionsSvc.open(id);
+				return true;
+			} catch (e) {
+				console.warn("[semantica-graph] sessions.open 失败", e);
+				return false;
+			}
 		}
 
 		/** 在侧边栏里打开承载 Explorer 界面的标签。 */
@@ -406,8 +434,15 @@ window.__ModuleLoader__.load({
 						setUrl(data.url || null);
 						setStale(data.stale === true);
 						setPhase("ready");
-						// 用户点按钮就是为了看图，所以拿到 URL 就直接开标签
-						if (data.url) openExplorerTab(ctx, data.url, sessionId);
+						// 刻意**不自动打开 Explorer 标签**。
+						//
+						// 以前这里是 `if (data.url) openExplorerTab(...)`，理由是
+						// 「用户点按钮就是为了看图」。但那会把刚打开的控制面板顶掉：
+						// 第一次点头部图标 → 面板刚出现就被 Explorer 替换 → 用户看到
+						// 的是 semantica 的界面，面板底部的四个分析按钮压根没机会被看到
+						// （得再点一次图标才回得来）。
+						//
+						// 现在面板留在原处，要看图点「打开完整 Explorer」那个主按钮。
 					} catch (e) {
 						setErr({ error: String((e && e.message) || e) });
 						setPhase("error");
@@ -435,7 +470,13 @@ window.__ModuleLoader__.load({
 					setAnalysis(null);
 					try {
 						const data = await analyze(sessionId, kind);
-						setAnalysis(data || { ok: false, error: "宿主没有返回结果" });
+						const result = data || { ok: false, error: "宿主没有返回结果" };
+						// 成功就直接切过去。用户要的是「开新对话」，不是留在原地面板
+						// 上看一行「已创建」——那样还得自己去列表里找。
+						if (result.ok === true && result.sessionId) {
+							result.navigated = openSession(result.sessionId);
+						}
+						setAnalysis(result);
 					} catch (e) {
 						setAnalysis({ ok: false, error: String((e && e.message) || e) });
 					} finally {
@@ -608,7 +649,15 @@ window.__ModuleLoader__.load({
 								analysis.ok === true
 									? [
 											T("analyze.done") + " ",
-											h("b", { key: "label" }, analysis.label || analysis.childId || ""),
+											h("b", { key: "label" }, analysis.label || analysis.sessionId || ""),
+											// 自动跳转失败时不装作没事 —— 告诉用户去哪儿找
+											analysis.navigated === false
+												? h("div", { key: "manual", className: "semg-muted" }, T("analyze.manual"))
+												: null,
+											// 图数据没注进去的话这个对话等于没用，必须说清楚
+											analysis.injected === false
+												? h("div", { key: "nodigest", className: "semg-muted" }, T("analyze.noDigest"))
+												: null,
 											analysis.drillable === false
 												? h(
 														"div",
@@ -811,7 +860,16 @@ window.__ModuleLoader__.load({
 				),
 			);
 
-			// 2) 控制面板 tab + Explorer 界面 tab
+			// 2) sessions（只用来在新对话建好后跳过去）
+			//
+			// 和 betterSidebar 一样走延迟注入：它是可选服务，缺席时不应该拦下
+			// 整个插件。拿不到就只是不自动跳转。
+			ctx.inject(["sessions"], (sctx) => {
+				const svc = sctx.get("sessions");
+				if (svc && typeof svc.open === "function") sessionsSvc = svc;
+			});
+
+			// 3) 控制面板 tab + Explorer 界面 tab
 			ctx.inject(["betterSidebar"], (sctx) => {
 				// 用 get() 而不是 sctx.betterSidebar —— 后者是服务属性访问，
 				// 正是「cannot get property "x" without inject」的触发方式。

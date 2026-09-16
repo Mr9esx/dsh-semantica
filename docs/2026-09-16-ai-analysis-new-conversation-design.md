@@ -1,0 +1,182 @@
+# 设计：AI 分析新对话
+
+日期：2026-09-16
+状态：已实现（v0.6.0）
+修订：第一版做成「子代理」后被否，改为「新对话」——见 §6
+
+## 需求
+
+用户原话：
+
+> 我们这个插件能加一个能力吗，就是新开一个子对话，注入让 semantica 解析完的数据，让 AI 去分析
+
+后续澄清与修订：
+
+1. **入口形态**：「分别做几个按钮：复盘对话、理解图数据等」—— 一个分析目的一个按钮。
+2. **注入深度**：「两者结合：摘要打底 + 可钻取」—— 既注入压缩摘要，也给新对话 Explorer 地址和端点清单让它自己钻。
+3. **形态修正**（试用后）：「点击了分析，怎么是开子代理去跑的，直接开新对话吧」—— 不要 subagent，要普通会话。
+4. **发现性修正**（试用后）：「没看到按钮啊」—— 第一次点击被自动跳转的 Explorer 顶掉了控制面板。
+
+## 交互
+
+四个按钮，加在**插件自己的控制面板 tab**（`LauncherView`）底部。不往 semantica 的
+SPA 里塞，那是上游打包好的界面，改不了。
+
+| 按钮 | kind | 新对话要回答的 |
+|---|---|---|
+| 复盘这次对话 | `retro` | 做了哪些选择、哪些走了弯路、代价在哪 |
+| 理解图数据 | `structure` | 图结构解读：关键节点、社群、关系类型分布 |
+| 检验抽取质量 | `quality` | 哪些是噪音、哪些漏抽了、关系方向对不对 |
+| 给当前任务的建议 | `advice` | 结合图里的实体关系对手上的活给建议 |
+
+按钮状态**不复用面板的 `phase`**：分析失败不该把整个面板打成错误页（图还好好的），
+结果单独存 `analysis` 状态，内联显示在按钮下方。
+
+## 数据流
+
+```
+LauncherView 点按钮
+  → POST /api-semantica/analyze { sessionId, kind }
+  → 宿主：
+      ① 图在缓存里就用，不在就 prepareGraph() 补一次
+      ② readGraph() 读图 JSON → buildDigest() 组装摘要
+      ③ 找父会话所属 workspace
+      ④ sessionController.create({ workspaceId })   → 新对话
+      ⑤ sessionController.selectModel({ 继承父的 provider/model })
+      ⑥ agent.inject(digest)      source:{kind:'plugin'}
+      ⑦ sessionController.prompt({ content:[提问] })
+  → 返回 { ok, sessionId, label, digestChars, injected, drillable }
+  → 客户端 ctx.sessions.open(sessionId) 直接切过去
+```
+
+## 关键决策
+
+### 1. 开新对话，不注入当前对话
+
+图数据 6-7KB。直接塞进当前对话会永久占住上下文，之后每轮都背着它；分析结果也会
+和正在做的事混在一条时间线上。
+
+### 2. 走 sessionController，不走 agents.create
+
+`ctx.get('sessionController')` 就是 GUI「新建对话」用的路径：
+
+```js
+create({ workspaceId | cwd })      // 空会话 → { sessionId }
+selectModel({ sessionId, ... })    // 选模型
+prompt({ sessionId, content })     // 第一条用户消息（内部 agent.followup）
+```
+
+`agents.create()` 是 subagent 的接缝：必须传 `meta.origin:'subagent'` +
+`parentSession`，产物进「子会话」页签、受父子关系约束，还要自造 seed。第一版用的
+就是这个，用户实测后否掉。
+
+### 3. workspace 必须挂
+
+`create()` 只在传了 `workspaceId` 时才 `attachSession()`，而 GUI 的会话列表**按
+workspace 分组**（`workspaces.find(w => w.sessionIds.includes(id))`）。不挂进去，
+新对话建了也找不到。
+
+定位方式：`workspaceRegistry.list()` 里找 `sessionIds.includes(parentSessionId)` 的
+那个（`WorkspaceEntity.id` 是类字段，不是 getter）；退化方案是 `resolveByPath(cwd)`。
+
+`attachSession()` 会 realpath 校验会话的 cwd（存在、是目录、与 workspace 路径一致），
+不过就抛错 —— 那会**一条对话都建不出来**。所以 `create()` 失败时退回 `cwd` 重试：
+会话仍可用，只是不出现在侧边栏列表，比整个失败强。
+
+### 4. 两条消息：inject 背景 + prompt 提问
+
+`inject` = 排队中的模型可见上下文，不唤醒驱动；`prompt` = `agent.followup()`，唤醒。
+
+拆开是为了日志里留两条 `user/message`：plugin 来源那条被 UI 折叠成 context 行，
+提问才是正常用户气泡。合并会让几 KB 数据糊在用户气泡里。
+
+`selectModel` 不能跳过：新会话没有任何模型选择，不选的话 `prompt` 会以
+`model-unavailable: no adapter serves provider "..."` 拒绝。从父会话继承
+provider / model / reasoningEffort。选模型失败不致命，只记 warn。
+
+### 5. `src/analyze.js` 零外部依赖
+
+`createUserMessage` 上游是纯函数（`MessageId(id){return id}` 零校验），可手写。
+
+不 import 的原因：**插件是 `link:` 安装的**，真实路径在 `~/Downloads/`，
+`profiles/web/node_modules/dsh-semantica-graph` 只是相对软链。Node 的 ESM 解析会先
+把软链折成真实路径（实测报错里就是 `~/Downloads/.../analyze.js`），父级向上走够不到
+`$DSH_HOME/profiles/node_modules/@deepseek-ai/*`。
+
+| 做法 | 最坏结果 |
+|---|---|
+| import | 解析不了 → 整个插件加载失败，`apply` 不执行，图谱功能一起挂 |
+| 手写 | 消息少个字段 → 主功能不受影响 |
+
+### 6. 不自动打开 Explorer（修订）
+
+第一版在图建好后会自动 `openExplorerTab()`，理由是「用户点按钮就是为了看图」。
+但这会把刚打开的控制面板顶掉：
+
+```
+第一次点头部图标 → 控制面板刚出现 → 被 Explorer 标签替换
+                → 用户看到 semantica 界面，看不到底部的四个分析按钮
+                → 得再点一次图标才回得来
+```
+
+实测反馈就是「没看到按钮啊，哪里能点啊」。现在不自动开了，面板留在原处，
+要看图点「打开完整 Explorer」那个主按钮。
+
+### 7. digest 的结构
+
+`buildDigest()` 纯函数，约 6-7KB（≈2600 token）：
+
+1. 头部：说明这是 Semantica 抽的原生 ContextGraph，不是对话复述
+2. 图规模 + 节点/边类型分布
+3. **决策全量**（category / scenario / reasoning / outcome / alternatives / choiceKind）
+4. 时间线（起止 + 按小时密度 Top 5）
+5. 高频实体 Top 40、关系 Top 30
+6. **钻取接口清单**：Explorer 基址 + 11 个实测可用端点 + 两个踩过的坑
+   - `/api/temporal/snapshot` 参数是 `?at=<ISO>` 不是 `?time=`
+   - `/api/reason` 的 facts 要写 `parent_of(a,b)`，规则 `IF...THEN...` 结尾不加句号
+
+Explorer 没起来时降级成纯摘要，digest 里标注「无法钻取」。
+
+## 错误处理
+
+全部返回结构化 `code`，不抛异常。宿主 `inject = []`，硬依赖会让插件整个加载不起来。
+
+| code | 触发 |
+|---|---|
+| `session-controller-unavailable` | `ctx.get('sessionController')` 缺失 |
+| `parent-not-live` | 父会话没有在运行，拿不到 cwd / preset / 模型 |
+| `create-failed` | 所有 create 尝试都失败 |
+| `prompt-failed` | 对话建好了但提问失败（仍回报 `sessionId`） |
+| `graph-missing` | 读不到图文件 |
+| `unknown-kind` | 未知的分析类型 |
+
+## 测试
+
+`/tmp/test_analyze.mjs`，60+ 项断言，两半：
+
+- **UI**：真 React 渲染 `LauncherView`，中英各一次，断言 `semg-analyze` 区块、
+  四段文案、恰好 4 个按钮、初始可用
+- **宿主**：mock ctx 跑 `createAnalysisSession`，断言
+  - 走 `sessionController`，且 **`agents.create` 调用次数为 0**（防退回子代理）
+  - 调用顺序 `create → selectModel → 取 agent → inject → prompt`
+  - `workspaceId` 优先、退回 `cwd`、workspace 挂载失败时重试
+  - 两条消息的来源标记（`plugin` / 提问内容）
+  - 模型继承（provider / model / reasoningEffort）
+  - 拿不到 agent 时不阻断，但 `injected:false`
+  - 五条失败路径都返回正确 code 且不抛
+
+`/tmp/test_digest.mjs` 覆盖 digest 组装（真实 2186 节点图）。
+
+## 未做
+
+- ②本体（`ClassInferencer` → `OWLGenerator` → `POST /api/ontology/load`）
+- ③词表（`POST /api/vocabulary/import`）
+- ④记忆（用户明确「不需要 / 先不做」）
+
+## 已知限制
+
+- **宿主半侧改动需要重启 DSH**。实测：改完后 `POST /api-semantica/prepare` 仍 200
+  （插件活着），但 `POST /api-semantica/analyze` 返回 405、`GET` 返回 404 —— 新路由
+  没注册。客户端半侧是热加载的（硬刷新即可），宿主侧不是。
+- 若 workspace 挂载失败退化到 `cwd`，新对话不会出现在侧边栏列表里，只能在
+  返回的 `sessionId` 上找到。

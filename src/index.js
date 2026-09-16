@@ -154,7 +154,7 @@ function apply(ctx) {
 
     // —— 内部：读会话 → 建 ContextGraph → 起 Explorer ——
     //
-    // 抽成函数是因为「打开 Explorer」和「开 AI 分析子会话」两条路都要这张图，
+    // 抽成函数是因为「打开 Explorer」和「开 AI 分析新对话」两条路都要这张图，
     // 而且都要能复用缓存。返回 `{ code, payload }`：code 是要发的 HTTP 状态码，
     // payload 就是原来的响应体，行为与重构前逐字节一致。
     async function prepareGraph(sessionId, { refresh = false, maxSegments } = {}) {
@@ -313,10 +313,15 @@ function apply(ctx) {
       },
     })
 
-    // —— 分析：开一个子会话，把图数据注入进去让 AI 分析 ——
+    // —— 分析：开一个**新对话**，把图数据注入进去让 AI 分析 ——
     //
-    // 不把图塞进当前对话，而是新开子会话（DSH 的 Side Chat 那套接缝）。
-    // 子会话出现在侧边栏「子会话」页签，能读、能继续追问，不污染当前这轮。
+    // 不把图塞进当前对话（会永久占住上下文），而是走 sessionController 新建
+    // 一条普通会话 —— 和 GUI「新建对话」是同一条路径，所以它会出现在侧边栏的
+    // 会话列表里，能读、能继续追问，不污染当前这一轮。
+    //
+    // 注意别改用 agents.create({ meta:{ origin:'subagent' } })：那建出来的是
+    // 子代理，会被归到「子会话」页签。试过了，用户要的是真·新对话。
+    //
     // 具体做法与设计理由见 src/analyze.js 的文件头。
     ws.register({
       kind: 'exact',
@@ -378,9 +383,11 @@ function apply(ctx) {
 
           send(res, 200, {
             ok: true,
-            childId: out.childId,
+            sessionId: out.sessionId,
             label,
             digestChars: out.digestChars,
+            // 图数据有没有真的注进去。false 时前端会提示「只有提问、没有背景数据」。
+            injected: out.injected,
             nodes: graph.nodes.length,
             edges: graph.edges.length,
             drillable: Boolean(running?.url),

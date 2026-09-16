@@ -305,7 +305,7 @@ outgoing_edges = self._adjacency.get(current_id, [])
 
 ---
 
-## 让 AI 分析这张图（子会话）
+## 让 AI 分析这张图（新对话）
 
 控制面板底部有四个按钮：
 
@@ -313,74 +313,82 @@ outgoing_edges = self._adjacency.get(current_id, [])
 复盘这次对话 · 理解图数据 · 检验抽取质量 · 给当前任务的建议
 ```
 
-点下去不是把图塞进当前对话，而是**新开一个子会话**，把 Semantica 抽好的数据注入
-进去让 AI 分析。子会话出现在侧边栏的「子会话」页签里，可以读、可以继续追问，
-而且不污染当前这一轮。
+点下去不是把图塞进当前对话，而是**新开一条对话**，把 Semantica 抽好的数据注入
+进去让 AI 分析，然后界面直接切过去。新对话就是一条普通会话，出现在会话列表里，
+可以继续追问，而且不污染当前这一轮。
 
-### 为什么开子会话而不是直接注入当前对话
+### 为什么开新对话而不是直接注入当前对话
 
 图数据是几 KB 的文本。直接塞进当前对话会把它永久留在上下文里，之后每一轮都要
-背着它；而且分析结果和你正在做的事混在一条时间线上，回头很难找。开子会话则把
-「分析」这件事隔离成一条独立的、可回溯的线。
+背着它；而且分析结果和你正在做的事混在一条时间线上，回头很难找。开一条新对话
+则把「分析」这件事隔离成一条独立的、可回溯的线。
 
-这个接缝是 DSH 官方的 —— `dsh-better-sidebar` 的 `context-types.ts` 里写着：
+### 走 sessionController，不走 agents.create
 
-> Create a session + agent with a custom seed — the Side Chat thread-creation seam:
-> the SAME public seam api-proxy's session.fork and the subagent fork provider use.
+用的是 `ctx.get('sessionController')` —— 也就是 GUI 自己「新建对话」用的那条路径：
 
-也就是 `ctx.get('agents').create(options)`。
+```js
+create({ workspaceId | cwd })      // 建一个空会话，返回 { sessionId }
+selectModel({ sessionId, ... })    // 给它选上模型
+prompt({ sessionId, content })     // 发第一条用户消息（内部 agent.followup）
+```
+
+**为什么不 `agents.create()`**：那是子代理（subagent）的接缝。用它得传
+`meta.origin:'subagent'` + `parentSession`，建出来的东西会进侧边栏「子会话」页签、
+被 SubagentView 按父子关系归类，而且还要自己造 seed（`subagent/descriptor` 事件，
+外加一个钉死的描述符版本号）。第一版就是这么写的，实测下来不是要的效果 ——
+用户要的是真·新对话。
+
+**workspace 那一步不能省**。`create()` 只在传了 `workspaceId` 时才
+`attachSession()` 把会话登记进 workspace，而 GUI 的会话列表是**按 workspace 分组**的
+（客户端就是 `workspaces.find(w => w.sessionIds.includes(id))`）。不挂进去，
+新对话建了也找不到。所以先定位父会话所属的 workspace，拿不到才退回用 `cwd`。
+
+`attachSession()` 会拿会话的 cwd 在磁盘上 realpath 校验一遍（必须存在、是目录、
+且与 workspace 路径一致），校验不过会抛错 —— 那样会**一条对话都建不出来**。
+所以 `create()` 失败时会退回 `cwd` 再试一次：会话仍然可用，只是不出现在侧边栏，
+比整个失败强。
 
 ### 注入为什么分成两条消息
 
 ```js
 agent.inject(digest)    // source: { kind: 'plugin' }  —— 背景数据
-agent.followup(prompt)  // source: { kind: 'user' }    —— 提问
+sc.prompt({ ... })      // source: { kind: 'user' }    —— 提问，且唤醒驱动
 ```
 
-`inject` 送的是**排队中的模型可见上下文**，它不唤醒驱动；`followup` 才是唤醒的那条。
-分成两条是为了让日志里留下两条 `user/message`：注入那条 source 是 `plugin`，
-UI 把它折叠成一行 context；提问才是正常的用户气泡。合并成一条的话，
-几 KB 的图数据会整个糊在用户气泡里。
+`inject` 送的是**排队中的模型可见上下文**，它不唤醒驱动；`prompt` 走的是
+`agent.followup()`，那才是唤醒的那条。分成两条是为了让日志里留下两条
+`user/message`：注入那条 source 是 `plugin`，UI 把它折叠成一行 context；
+提问才是正常的用户气泡。合并成一条的话，几 KB 的图数据会整个糊在用户气泡里。
 
-### seed 为什么只有一个事件
-
-Side Chat 的 seed 是**父会话的完整事件日志**，所以它必须处理「父会话正在跑、
-turn 没闭合」—— 要合成 `step/end` + `turn/end{reason:'interrupted'}` 把半轮冻住，
-还要处理「工具调用没有配对的 result」这种连冻都冻不干净的情况。
-
-我们**不继承历史**。用户是在对话进行到一半时点按钮的，父会话必然是 mid-turn；
-而 digest 里已经带了决策、轮次、时间线。所以 seed 只放一个
-`subagent/descriptor` 事件就够 —— 整个 open-turn 问题不复存在。
-
-那个 descriptor 不能省：没有它的子会话会被宿主目录确定性地渲染成 `corrupt` 诊断行。
-
-代价是子会话不知道对话原文，只知道图。对「分析图」这个目的足够。
+`selectModel` 也不能跳过：新会话还没有任何模型选择，不选的话 `prompt` 会以
+`model-unavailable: no adapter serves provider "..."` 直接拒绝。所以从父会话继承
+provider / model / reasoningEffort。选模型失败不致命（可能已从设置里继承默认值），
+只记一条 warn。
 
 ### `src/analyze.js` 为什么不 import `@deepseek-ai/*`
 
-上游那两处都是纯函数，可以照着手写：
+`createUserMessage` 上游是纯函数，可以照着手写：
 
 ```js
-createUserMessage(input) = {...input, role:'user', id: MessageId(randomUUID())}
+createMessage(input) = deepFreeze(structuredClone({...input, id: MessageId(randomUUID())}))
 MessageId(id) { return id }            // 品牌函数，零校验
-snapshotSubagentDescriptor(x) = {version:3, mode, provider, label, ...}
 ```
 
 之所以不 import，是因为**这个插件是 `link:` 安装的**：真实路径在
-`~/Downloads/dsh-semantica-graph`，而
-`profiles/web/node_modules/dsh-semantica-graph` 只是个相对软链。Node 的 ESM 解析
-会先把软链折成真实路径（实测报错里就是 `~/Downloads/.../analyze.js`），于是父级
-向上走够不到 `$DSH_HOME/profiles/node_modules/@deepseek-ai/*`。
+`~/Downloads/dsh-semantica-graph`，而 `profiles/web/node_modules/dsh-semantica-graph`
+只是个相对软链。Node 的 ESM 解析会先把软链折成真实路径（实测报错里就是
+`~/Downloads/.../analyze.js`），于是父级向上走够不到
+`$DSH_HOME/profiles/node_modules/@deepseek-ai/*`。
 
 这个失败模式极不对称：
 
 | 做法 | 最坏结果 |
 |---|---|
 | import | 解析不了 → **整个插件加载失败**，`apply` 压根不执行，图谱功能一起挂 |
-| 手写 | 描述符版本对不上 → 子会话被标 `corrupt`，主功能不受影响 |
+| 手写 | 消息少个字段 → 主功能不受影响 |
 
-所以选零依赖。代价是 `DESCRIPTOR_VERSION = 3` 是钉死的，DSH 升级若改了描述符
-版本需要同步改。
+所以选零依赖。
 
 ### digest 里有什么
 
@@ -394,10 +402,20 @@ snapshotSubagentDescriptor(x) = {version:3, mode, provider, label, ...}
   （`/api/temporal/snapshot` 的参数是 `?at=` 不是 `?time=`；`/api/reason` 的
   facts 要写成 `parent_of(a,b)` 且规则结尾不加句号）
 
-所以是**摘要打底 + 可钻取**：子会话自己带了 bash，可以按清单用 `curl` 去查更细的数据。
+所以是**摘要打底 + 可钻取**：新对话自己带了 bash，可以按清单用 `curl` 去查更细的数据。
 Explorer 没起来时降级成纯摘要，并在 digest 里标注「无法钻取」，让模型知道别硬编。
 
+### 一个容易踩的 UI 坑
+
+控制面板最早会在图建好之后**自动打开 Explorer 标签**，理由是「用户点按钮就是为了
+看图」。但那会把刚打开的控制面板顶掉：第一次点头部图标 → 面板刚出现就被 Explorer
+替换 → 用户看到的是 semantica 的界面，面板底部的四个分析按钮压根没机会被看到，
+得再点一次图标才回得来。
+
+现在不自动开了，面板留在原处，要看图点「打开完整 Explorer」。
+
 ---
+
 
 ## 架构
 
@@ -409,22 +427,22 @@ Explorer 没起来时降级成纯摘要，并在 digest 里标注「无法钻取
 │ 控制面板 tab        │                │   ├ session-reader       │    │  ├ RelationExtract │
 │  └ 进度/统计/报错   │                │   ├ bridge（常驻 worker）  │NDJSON│ └ ContextGraph     │
 │  └ 四个分析按钮      │◀── URL/childId│   ├ explorer（进程管理）   │    │ └ ContextGraph     │
-│ Explorer tab       │                │   └ analyze（建子会话+注入）│    └────────────────────┘
+│ Explorer tab       │                │   └ analyze（建新对话+注入）│    └────────────────────┘
 │  └ iframe: 上游 UI  │◀─── iframe ────│  127.0.0.1:<动态端口>      │◀─── semantica-explorer
 └────────────────────┘                └───────────┬──────────────┘
                                                   │ agents.create(seed)
                                         ┌─────────▼──────────┐
-                                        │ 子会话（侧边栏页签） │
+                                        │ 新对话（会话列表）   │
                                         └────────────────────┘
 ```
 
 | 文件 | 职责 |
 | --- | --- |
-| `src/index.js` | host 半侧：注册 `/api-semantica/{status,prepare,analyze}`，编排「读会话 → 建图 → 起 Explorer」 |
+| `src/index.js` | host 半侧：注册 `/api-semantica/{status,prepare,analyze}`，编排「读会话 → 建图 → 起 Explorer」与「建新对话」 |
 | `src/session-reader.js` | 解多帧 zstd 日志、解析事件、抽对话结构；走 `sessionPersistence.list/locate`，回退扫 `$DSH_HOME/sessions` |
 | `src/semantica-bridge.js` | 常驻 Python worker 的 NDJSON 桥；懒启动、空闲 10 分钟回收、超时与错误传播 |
 | `src/explorer.js` | `semantica-explorer` 子进程管理：空闲端口分配、健康检查、就绪超时、按会话缓存、总量上限、空闲与 LRU 回收，以及依赖探测 |
-| `src/analyze.js` | 四段分析提问 + digest 组装 + 开子会话并注入。零外部依赖（原因见上） |
+| `src/analyze.js` | 四段分析提问 + digest 组装 + 开新对话并注入。零外部依赖（原因见上） |
 | `src/graph_worker.py` | Python 侧：markdown 归一化、逐段抽实体/关系、组装 ContextGraph 并落盘 |
 | `src/client.js` | 浏览器半侧：头部按钮 + 控制面板 tab（进度、统计、报错与修复指引、四个分析按钮）+ Explorer tab（自己渲染的 iframe） |
 | `scripts/install.mjs` | 装/卸 profile，自动备份 manifest |
