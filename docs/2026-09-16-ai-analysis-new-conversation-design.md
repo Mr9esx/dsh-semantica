@@ -168,9 +168,12 @@ Explorer（跨源 + sandbox 下会不会白屏）。
 3. **决策全量**（category / scenario / reasoning / outcome / alternatives / choiceKind）
 4. 时间线（起止 + 按小时密度 Top 5）
 5. 高频实体 Top 40、关系 Top 30
-6. **钻取接口清单**：Explorer 基址 + 11 个实测可用端点 + 两个踩过的坑
-   - `/api/temporal/snapshot` 参数是 `?at=<ISO>` 不是 `?time=`
-   - `/api/reason` 的 facts 要写 `parent_of(a,b)`，规则 `IF...THEN...` 结尾不加句号
+6. **钻取接口清单**：Explorer 基址 + 17 个实测可用端点 + 5 条踩过的坑。
+   清单里还写了「路由的权威来源是 `GET <base>/openapi.json`」——这份清单曾经凭印象
+   写错过 6 条路径（`/api/analytics/centrality`、`/api/analytics/communities`、
+   `/api/search?q=`、`/api/graph/nodes/<id>`、`/api/graph/neighbors/<id>`、`?hops=`
+   参数名），喂给模型全是 404，所以现在把权威来源交出去，让模型自己核对。
+   用 `node scripts/check-endpoints.mjs` 对账（拿真实 openapi.json 逐条比）。
 
 Explorer 没起来时降级成纯摘要，digest 里标注「无法钻取」。
 
@@ -211,6 +214,30 @@ Explorer 没起来时降级成纯摘要，digest 里标注「无法钻取」。
 - ②本体（`ClassInferencer` → `OWLGenerator` → `POST /api/ontology/load`）
 - ③词表（`POST /api/vocabulary/import`）
 - ④记忆（用户明确「不需要 / 先不做」）
+
+## 端点清单的维护
+
+digest 和「理解图数据」的提问里都直接写了端点路径。这些路径写错的后果很隐蔽：
+上游返回的是 `{"detail":"API route not found"}`，模型多半会把它当成「这张图没数据」，
+而不是「路径写错了」——分析质量静默变差，没人会发现。
+
+所以加了两道防线：
+
+1. digest 里明确写出**权威来源是 `GET <base>/openapi.json`**（78 个 path / 82 个 operation），
+   并提示写错时返回的是那个 detail 字符串。
+2. `node scripts/check-endpoints.mjs` 把 `src/analyze.js` 里出现的每个 `/api/...` 拿去和
+   真实 openapi.json 对账，对不上就非 0 退出。举例子用的具体 id（`ent:xxx`）按占位符处理。
+
+实测（446 节点 / 519 边的真实图）确认过的几个事实：
+
+- 邻居和因果链**都只走出边**。`/api/graph/node/ent:xxx/neighbors` 对纯被提及的实体返回
+  `[]` —— 因为它只有入边，不是接口坏了。decision 节点则能正常返回 `decided_at` /
+  `next_decision` 两条邻居。
+- `/api/graph/stats` 的 `density` 按有向算 `E/(N(N-1))`，`/api/analytics` 的
+  `connectivity.density` 按无向算 `E/(N(N-1)/2)`，后者恒为前者的两倍
+  （同一张图：0.002615 对 0.005230）。两个都对，别混着比。
+- 搜索有两条路：`GET /api/graph/nodes?search=` 会给全部命中（实测 54 条），
+  `POST /api/graph/search` 走相关性排序、默认 limit 20。
 
 ## 已知限制
 

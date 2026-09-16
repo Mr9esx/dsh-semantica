@@ -276,6 +276,7 @@ Sigma: Coordinates of node ent:北京 are invalid.
 开发时：
 
 ```bash
-npm run check     # 语法 + inject 契约自检
-npm run visual    # 真 Chromium 量排版（溢出 / 重叠 / 高度）
+npm run check             # 语法 + inject 契约自检
+npm run check:endpoints   # digest 里的 /api 路径拿去和真实 openapi.json 对账
+npm run visual            # 真 Chromium 量排版（溢出 / 重叠 / 高度）
 ```

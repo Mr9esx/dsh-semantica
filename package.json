@@ -1,6 +1,6 @@
 {
   "name": "dsh-semantica-graph",
-  "version": "0.7.2",
+  "version": "0.7.3",
   "description": "DSH 插件：用 Semantica 把当前对话构建成知识图谱，在侧边栏内嵌其自带的 Knowledge Explorer 浏览，并可开新对话让 AI 分析",
   "keywords": [
     "deepseek-harness",
@@ -41,6 +41,7 @@
   },
   "scripts": {
     "check": "node --check src/index.js && node --check src/client.js && node --check src/analyze.js && node scripts/check-inject.mjs",
+    "check:endpoints": "node scripts/check-endpoints.mjs",
     "visual": "node scripts/visual-check.mjs"
   },
   "engines": {

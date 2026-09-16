@@ -160,8 +160,8 @@ export const ANALYSIS_KINDS = {
       '更细的数据你可以按「钻取接口」那一节的端点，自己用 bash + curl 去查。',
       '',
       '按顺序回答：',
-      '1. **最关键的节点是谁？** 优先用 `/api/analytics/centrality` 的真实中心度数据，别只看频次。说明它们为什么关键。',
-      '2. **实体聚成了哪几个主题群？** 每群用一句话概括它在讲什么。',
+      '1. **最关键的节点是谁？** 用 `/api/analytics?metrics=centrality` 拿真实中心度，别只看频次。说明它们为什么关键。',
+      '2. **实体聚成了哪几个主题群？** `/api/analytics?metrics=community` 有现成的社群划分，每群用一句话概括它在讲什么。',
       '3. **关系类型各自反映什么？** `mentions` / `related_to` / `contains` 的分布说明了什么，有没有异常。',
       '4. **从结构能看出这次工作流的什么特征？** 比如是不是高度集中在某一块、有没有明显的孤立区域。',
       '',
@@ -388,33 +388,52 @@ export function buildDigest(graph, meta = {}) {
   L.push('## 钻取接口')
   L.push('')
   if (meta.explorerUrl) {
-    L.push(`Explorer 正在跑，基址 **${meta.explorerUrl}**。下面是实测可用的端点，`)
-    L.push('都是 JSON，你可以直接用 bash + curl 查更细的数据：')
+    L.push(`Explorer 正在跑，基址 **${meta.explorerUrl}**。全是 JSON，可以直接 bash + curl。`)
+    L.push('')
+    // 这份清单曾经凭印象写错过 6 条路径，喂给模型后全是 404。所以把权威来源
+    // 交给 openapi.json —— 上游加路由时这份清单不会跟着烂掉。
+    L.push(`**路由的权威来源是 \`GET ${meta.explorerUrl}/openapi.json\`**（78 个 path / 82 个 operation）。`)
+    L.push('下面这些是实测可用的常用端点；路径写错返回的是 `{"detail":"API route not found"}`，')
+    L.push('拿不准就先拉 openapi.json 对一遍。')
   } else {
     L.push('⚠️ 图服务这次没有启动（Explorer 依赖可能没装），所以**只能基于上面的静态摘要分析**，')
     L.push('无法钻取。请在结论里说明这一点。')
   }
   L.push('')
   L.push('```')
-  L.push('GET  /api/graph/stats                    图规模与类型分布')
-  L.push('GET  /api/graph/nodes/<nodeId>           单个节点详情')
-  L.push('GET  /api/graph/neighbors/<nodeId>?hops=1  邻居（注意：只走出边）')
-  L.push('GET  /api/search?q=<关键词>               全文搜索节点')
-  L.push('GET  /api/decisions                      决策列表')
-  L.push('GET  /api/decisions/<decisionId>/chain   某条决策的因果链')
-  L.push('GET  /api/analytics/centrality           中心度')
-  L.push('GET  /api/analytics/communities          社群划分')
-  L.push('GET  /api/temporal/bounds                时间范围')
-  L.push('GET  /api/temporal/diff?from_time=&to_time=   两个时刻之间新增/移除的节点')
-  L.push('POST /api/sparql                         SPARQL 查询，body {"query": "..."}')
+  L.push('GET  /api/graph/stats                         图规模与类型分布')
+  L.push('GET  /api/graph/nodes?search=&type=&limit=    列节点 / 按关键词搜（能一次给 50+ 条）')
+  L.push('POST /api/graph/search                        相关性搜索，body {"query":"...","limit":20}')
+  L.push('GET  /api/graph/edges                         边列表')
+  L.push('GET  /api/graph/node/<nodeId>                 单个节点详情')
+  L.push('GET  /api/graph/node/<nodeId>/neighbors?depth=1   邻居，depth 范围 1-5')
+  L.push('GET  /api/graph/node/<nodeId>/path?target=<id>    两点间路径')
+  L.push('GET  /api/analytics?metrics=centrality,community,connectivity   中心度 / 社群 / 连通性')
+  L.push('GET  /api/analytics/validation                图校验')
+  L.push('GET  /api/decisions?category=&limit=          决策列表')
+  L.push('GET  /api/decisions/<decisionId>/chain        某条决策的因果链')
+  L.push('GET  /api/provenance?node_id=<id>             出处血缘')
+  L.push('GET  /api/temporal/bounds                     时间范围')
+  L.push('GET  /api/temporal/snapshot?at=<ISO>          某一时刻的快照')
+  L.push('GET  /api/temporal/diff?from_time=&to_time=   两个时刻之间新增/移除（两个参数都必填）')
+  L.push('POST /api/reason                              Datalog 推理')
+  L.push('POST /api/sparql                              SPARQL 查询')
   L.push('```')
   L.push('')
-  L.push('两个已经踩过的坑，别重复踩：')
+  L.push('踩过的坑，别重复踩：')
   L.push('')
+  L.push('- **邻居和因果链都只走出边**（`ContextGraph.get_neighbors` 只读 `_adjacency`）。')
+  L.push('  实测 `/api/graph/node/ent:xxx/neighbors` 对纯被提及的实体返回 `[]` —— 不是接口坏了，')
+  L.push('  是它只有入边。要查「谁引用了它」得自己扫 `/api/graph/edges`。')
   L.push('- `/api/temporal/snapshot` 的参数是 **`?at=<ISO>`**，不是 `?time=`。')
   L.push('  写成 `?time=` 会被静默忽略、按「当前时间」返回全部节点，看起来像"时间过滤没生效"。')
   L.push('- `/api/reason` 的 facts 要写成 `parent_of(a,b)` 这种形式（不是 `"a parent_of b"`），')
   L.push('  规则用 `IF parent_of(?x,?y) AND parent_of(?y,?z) THEN ...`，**结尾不加句号**。')
+  L.push('- **两个 density 口径不同，别混着比**：`/api/graph/stats` 的 `density` 按有向算')
+  L.push('  `E/(N(N-1))`，`/api/analytics` 里 `connectivity.density` 按无向算 `E/(N(N-1)/2)`，')
+  L.push('  后者恒为前者的两倍（实测同一张 446 节点 / 519 边的图：0.002615 对 0.005230）。')
+  L.push('- `/api/graph/node/<id>/semantic-neighborhood` 需要节点带 embedding，本插件建的图')
+  L.push('  没有这些字段（已知限制），会返回空。')
   L.push('')
 
   let digest = L.join('\n')
