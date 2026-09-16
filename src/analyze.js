@@ -35,7 +35,7 @@
 // 数据会整个糊在用户气泡里。
 
 import { randomUUID } from 'node:crypto'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 /**
@@ -53,7 +53,11 @@ import { dirname, join } from 'node:path'
 export function dumpFailure(graphPath, sessionId, kind, err) {
   if (!graphPath) return null
   try {
-    const file = join(dirname(graphPath), 'last-analyze-error.txt')
+    // 目录不一定在（图是该会话第一次建时才生成的）。不 mkdir 的话 writeFileSync
+    // 会失败、被下面的 catch 吞掉、静默返回 null —— 诊断本身失效是最糟的情况。
+    const dir = dirname(graphPath)
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'last-analyze-error.txt')
     const lines = [
       `when      : ${new Date().toISOString()}`,
       `sessionId : ${sessionId}`,
