@@ -65,13 +65,10 @@ window.__ModuleLoader__.load({
 			"tab.title": "知识图谱",
 			"state.working": "正在用 Semantica 抽取实体与关系…",
 			"state.workingHint": "首次运行要加载模型，大约十几秒到半分钟。",
-			"state.ready": "已就绪",
-			"state.readyHint": "Explorer 已在「知识图谱」标签里打开。",
 			"state.empty": "这个对话还没有可抽取的内容。",
 			"error.title": "无法生成图谱",
 			"error.retry": "重试",
 			"error.detail": "详情",
-			"action.open": "打开完整 Explorer",
 			"action.refresh": "重新抽取",
 			"action.reopen": "重新打开",
 			"stat.nodes": "节点",
@@ -81,15 +78,18 @@ window.__ModuleLoader__.load({
 			"stat.took": "耗时",
 			"engine.label": "引擎",
 			"note.stale": "会话此后又有新内容，这张图是旧的。",
+			"note.staleShort": "图已过期",
+			"action.dismiss": "关掉这条提示",
+			"state.emptyHint": "还没有图。点右边的「重新抽取」开始。",
 			"action.reload": "刷新",
 			"action.external": "在浏览器打开",
 			"state.loading": "正在载入 Explorer…",
 			"view.noUrl": "这个标签没有拿到 Explorer 地址。关掉它，回到「知识图谱」面板点「重新打开」。",
 			"note.api": "Explorer 的 REST API",
 			"note.explorer": "上游 Explorer",
-			"analyze.title": "让 AI 分析",
-			"analyze.hint":
-				"新开一个对话，把这张图的数据注入进去让 AI 分析。新对话会出现在会话列表里，可以继续追问。",
+			// 四个按钮只有 title 提示，所以「会新开一个对话」这件事必须写进 tooltip，
+			// 否则用户点下去才发现跳到别处了。
+			"analyze.tip": "会新开一个对话，先把这张图的数据注入进去，再让 AI 分析。",
 			"analyze.retro": "复盘这次对话",
 			"analyze.structure": "理解图数据",
 			"analyze.quality": "检验抽取质量",
@@ -108,13 +108,10 @@ window.__ModuleLoader__.load({
 			"tab.title": "Knowledge graph",
 			"state.working": "Extracting entities and relations with Semantica…",
 			"state.workingHint": "The first run loads the models; expect up to half a minute.",
-			"state.ready": "Ready",
-			"state.readyHint": "The Explorer is open in the “Knowledge graph” tab.",
 			"state.empty": "Nothing extractable in this conversation yet.",
 			"error.title": "Could not build the graph",
 			"error.retry": "Retry",
 			"error.detail": "Details",
-			"action.open": "Open the full Explorer",
 			"action.refresh": "Re-extract",
 			"action.reopen": "Reopen",
 			"stat.nodes": "Nodes",
@@ -124,6 +121,9 @@ window.__ModuleLoader__.load({
 			"stat.took": "Took",
 			"engine.label": "Engine",
 			"note.stale": "The conversation has grown since; this graph is stale.",
+			"note.staleShort": "Stale",
+			"action.dismiss": "Dismiss this notice",
+			"state.emptyHint": "No graph yet — press “Re-extract” on the right to build one.",
 			"action.reload": "Reload",
 			"action.external": "Open in browser",
 			"state.loading": "Loading the Explorer…",
@@ -131,9 +131,7 @@ window.__ModuleLoader__.load({
 				"This tab has no Explorer address. Close it and press “Reopen” in the Knowledge graph panel.",
 			"note.api": "Explorer REST API",
 			"note.explorer": "Upstream Explorer",
-			"analyze.title": "Ask an AI to analyse",
-			"analyze.hint":
-				"Opens a new conversation seeded with this graph, so an AI can analyse it. It shows up in the session list and accepts follow-ups.",
+			"analyze.tip": "Opens a new conversation, seeds it with this graph, then asks the AI to analyse it.",
 			"analyze.retro": "Review this conversation",
 			"analyze.structure": "Understand the graph",
 			"analyze.quality": "Check extraction quality",
@@ -179,8 +177,29 @@ window.__ModuleLoader__.load({
 .semg-box[data-kind="error"]{border-left-color:var(--dsw-alias-state-error-primary,#d33)}
 .semg-box[data-kind="warn"]{border-left-color:#e8a33d}
 .semg-box[data-kind="ok"]{border-left-color:#3aa76d}
-/* 「让 AI 分析」那一块：跟上面的统计/按钮拉开距离，免得看着像同一组操作 */
-.semg-analyze{display:flex;flex-direction:column;gap:8px;margin-top:4px;padding-top:12px;border-top:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1))}
+/* ── 控制面板：工具栏 + 内嵌 Explorer 拼成一页 ── */
+.semg-split{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12px;box-sizing:border-box}
+.semg-toolbar{display:flex;flex-direction:column;gap:6px;padding:8px 10px;flex:0 0 auto;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12))}
+.semg-toolbar-top{display:flex;align-items:center;justify-content:space-between;gap:8px 12px;flex-wrap:wrap}
+.semg-toolbar-info{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0;flex:0 1 auto}
+/* flex:0 0 auto 在这里是安全的：它只放几个图标按钮，宽度不会超过容器 */
+.semg-toolbar-util{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:0 0 auto;margin-left:auto}
+/* 这一行**必须**能收缩：flex-basis 取 auto 会让它按内容宽度（约 380px）撑开，
+   于是内部的 flex-wrap 永远不触发，窄面板里直接横向溢出。 */
+.semg-toolbar-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:0 1 auto;min-width:0}
+.semg-mini{display:inline-flex;align-items:baseline;gap:3px;white-space:nowrap}
+.semg-mini b{font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}
+.semg-mini span{font-size:10px;color:var(--dsw-alias-label-secondary,#888)}
+.semg-tag{font-size:10px;padding:1px 6px;border-radius:999px;background:rgba(232,163,61,.16);color:#b57517;white-space:nowrap}
+.semg-sep{width:1px;height:16px;background:var(--dsw-alias-border-l2,rgba(0,0,0,.14));margin:0 2px}
+.semg-spin-sm{width:11px;height:11px;border-width:1.5px}
+.semg-banner{display:flex;align-items:flex-start;gap:8px;padding:7px 10px;flex:0 0 auto;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.03))}
+.semg-banner[data-kind="error"]{background:rgba(221,51,51,.07)}
+.semg-banner[data-kind="ok"]{background:rgba(58,167,109,.07)}
+.semg-banner-text{flex:1 1 auto;min-width:0}
+.semg-banner-x{flex:0 0 auto;border:none;background:transparent;color:inherit;font-size:14px;line-height:1;cursor:pointer;opacity:.5;padding:0 2px}
+.semg-banner-x:hover{opacity:1}
+.semg-empty{display:flex;align-items:center;justify-content:center;padding:20px;text-align:center;color:var(--dsw-alias-label-secondary,#888)}
 .semg-code{margin-top:6px;padding:8px;border-radius:6px;background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,.03));font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;line-height:1.5;white-space:pre-wrap;word-break:break-word;text-align:left}
 .semg-action{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;border:none;background:transparent;color:var(--dsw-alias-label-secondary,#666);cursor:pointer}
 .semg-action:hover{background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.06));color:var(--dsw-alias-label-primary,#222)}
@@ -387,10 +406,16 @@ window.__ModuleLoader__.load({
 
 		// ───────────────────────── 控制面板 tab ─────────────────────────
 
-		function StatCard(labelKey, value) {
+		/**
+		 * 工具栏里的一个统计项，例如「2186 节点」。
+		 *
+		 * 以前是 2×2 的大卡片（`semg-card`），挪进工具栏之后必须紧凑 ——
+		 * 数字用等宽数字（tabular-nums）以免位数变化时左右跳。
+		 */
+		function MiniStat(labelKey, value) {
 			return h(
-				"div",
-				{ className: "semg-card", key: labelKey },
+				"span",
+				{ className: "semg-mini", key: labelKey },
 				h("b", null, String(value ?? "—")),
 				h("span", null, T(labelKey)),
 			);
@@ -412,6 +437,8 @@ window.__ModuleLoader__.load({
 			// AI 分析：哪个按钮在跑（null = 没跑），以及上一次的结果
 			const [busyKind, setBusyKind] = useState(null);
 			const [analysis, setAnalysis] = useState(null);
+			// 只是重新载入内嵌的 Explorer，不重跑抽取
+			const [reloadKey, setReloadKey] = useState(0);
 			const startedFor = useRef(null);
 
 			const run = useCallback(
@@ -486,12 +513,11 @@ window.__ModuleLoader__.load({
 				[sessionId],
 			);
 
-			// — 进行中 —
+			// — 全屏的进行中 / 出错 —
 			//
-			// spinner 放在文案**上方**，整块在面板里垂直+水平居中。
-			// 之前是横排一行（`semg-head`：spinner 在文字左边、整体顶对齐）——
-			// 抽取要等十几秒到半分钟，期间面板里就这一行字，贴在顶上显得空。
-			if (phase === "working") {
+			// **只在还没有图的时候**占满整块。已经画出图之后再点「重新抽取」，
+			// 不该把图换成一块 spinner —— 工具栏里转个小圈就够了（见下面）。
+			if (phase === "working" && !url) {
 				return h(
 					"div",
 					{ className: "semg-panel semg-busy" },
@@ -501,8 +527,7 @@ window.__ModuleLoader__.load({
 				);
 			}
 
-			// — 出错 —
-			if (phase === "error") {
+			if (phase === "error" && !url) {
 				const hint = err && err.hint;
 				const code = err && err.code;
 				return h(
@@ -529,102 +554,161 @@ window.__ModuleLoader__.load({
 			}
 
 			// — 就绪（或还没开始）—
-			return h(
-				"div",
-				{ className: "semg-panel" },
-				h(
-					"div",
-					{ className: "semg-head" },
-					h(IconGraph, { size: 16 }),
-					h("span", null, T("tab.title")),
-				),
-
-				phase === "ready"
-					? h(
-							"div",
-							{ className: "semg-box", "data-kind": "ok" },
-							h("div", null, T("state.ready")),
-							h("div", { className: "semg-muted" }, T("state.readyHint")),
-						)
-					: null,
-
-				stale
-					? h("div", { className: "semg-box", "data-kind": "warn" }, T("note.stale"))
-					: null,
-
-				stats
-					? h(
-							"div",
-							{ className: "semg-grid" },
-							StatCard("stat.nodes", stats.nodes),
-							StatCard("stat.edges", stats.edges),
-							StatCard("stat.entities", stats.entities),
-							StatCard("stat.relations", stats.relations),
-						)
-					: null,
-
+			//
+			// **一个页面**：上面是工具栏（左边基本信息、右边按钮），下面是整块
+			// Explorer。以前这里是两个标签页 —— 先看信息页，再手动点开图 ——
+			// 反馈是「太粗暴了」，确实：信息和图本来就该一起看。
+			//
+			// 布局靠 semg-split：工具栏 flex:0 0 auto（高度自适应），
+			// ExplorerFrame 的 semg-viewbody 是 flex:1 1 auto 吃掉剩下的高度，
+			// 所以图总是撑满、不会被工具栏挤没。
+			const engineLine =
 				stats && stats.elapsed != null
-					? h(
-							"div",
-							{ className: "semg-muted" },
-							`${T("stat.took")} ${Number(stats.elapsed).toFixed(1)}s · ` +
-								`${T("engine.label")} semantica ${stats.engine?.semantica || "?"} / ` +
-								`Python ${stats.engine?.python || "?"}`,
-						)
-					: null,
+					? `${T("stat.took")} ${Number(stats.elapsed).toFixed(1)}s · ` +
+						`semantica ${stats.engine && stats.engine.semantica ? stats.engine.semantica : "?"} / ` +
+						`Python ${stats.engine && stats.engine.python ? stats.engine.python : "?"}`
+					: null;
 
-				h(
+			// 结果提示条。成功且已经跳过去了就没什么好说的 —— 用户已经在新对话里。
+			let banner = null;
+			if (analysis && !(analysis.ok === true && analysis.navigated === true)) {
+				const good = analysis.ok === true;
+				let body;
+				if (good) {
+					body = [
+						T("analyze.done") + " ",
+						h("b", { key: "label" }, analysis.label || analysis.sessionId || ""),
+						analysis.navigated === false
+							? h("div", { key: "manual", className: "semg-muted" }, T("analyze.manual"))
+							: null,
+						analysis.injected === false
+							? h("div", { key: "nodigest", className: "semg-muted" }, T("analyze.noDigest"))
+							: null,
+						analysis.drillable === false
+							? h("div", { key: "nodrill", className: "semg-muted" }, T("analyze.noDrill"))
+							: null,
+					];
+				} else {
+					body = analysis.code === "graph-missing" ? T("analyze.needPrepare") : analysis.error || "未知错误";
+				}
+				banner = h(
 					"div",
-					{ className: "semg-row" },
-					url
-						? h(
-								"button",
-								{
-									type: "button",
-									className: "semg-btn",
-									"data-primary": "1",
-									onClick: () => openExplorerTab(ctx, url, sessionId),
-								},
-								T("action.reopen"),
-							)
-						: null,
+					{ className: "semg-banner", "data-kind": good ? "ok" : "error" },
+					h("span", { className: "semg-banner-text" }, body),
 					h(
 						"button",
 						{
 							type: "button",
-							className: "semg-btn",
-							disabled: phase === "working",
-							onClick: () => run(true),
+							className: "semg-banner-x",
+							title: T("action.dismiss"),
+							onClick: () => setAnalysis(null),
 						},
-						T("action.refresh"),
+						"×",
 					),
-				),
+				);
+			}
 
-				url
-					? h(
-							"div",
-							{ className: "semg-muted" },
-							`${T("note.explorer")} · `,
-							h(
-								"a",
-								{ href: url, target: "_blank", rel: "noreferrer" },
-								`${url}/docs`,
-							),
-						)
-					: null,
+			return h(
+				"div",
+				{ className: "semg-split" },
 
-				// —— 让 AI 分析：开一个子会话，把图数据注入进去 ——
+				// ————————————— 工具栏 —————————————
 				//
-				// 不用 phase 管状态：分析失败不该把面板打成错误页（图还在、
-				// 还能用），所以结果单独存 analysis，内联在按钮下面显示。
+				// 明确分成两行，不靠 flex-wrap 碰运气：
+				//   第一行 —— 左边基本信息，右边工具按钮
+				//   第二行 —— 四个分析按钮
+				//
+				// 一开始把八个按钮塞进同一个 flex-wrap 容器，实测在 320px 面板里横向
+				// 溢出 315px：`.semg-toolbar-actions` 是 flex:0 0 auto，flex-basis 取的
+				// 是内容宽度（625px），它自己不收缩，内部的 wrap 就永远不会触发。
+				// 拆成两行、并让分析按钮那行撑满容器宽度，才不会溢出。
 				h(
 					"div",
-					{ className: "semg-analyze" },
-					h("div", { className: "semg-head" }, T("analyze.title")),
-					h("div", { className: "semg-muted" }, T("analyze.hint")),
+					{ className: "semg-toolbar" },
+
 					h(
 						"div",
-						{ className: "semg-row" },
+						{ className: "semg-toolbar-top" },
+
+						// 左：基本信息
+						h(
+							"div",
+							{ className: "semg-toolbar-info", title: engineLine || undefined },
+							h(IconGraph, { size: 14 }),
+							stats
+								? [
+										MiniStat("stat.nodes", stats.nodes),
+										MiniStat("stat.edges", stats.edges),
+										MiniStat("stat.entities", stats.entities),
+										MiniStat("stat.relations", stats.relations),
+									]
+								: h("span", { className: "semg-muted" }, T("state.empty")),
+							stale
+								? h("span", { className: "semg-tag", title: T("note.stale") }, T("note.staleShort"))
+								: null,
+						),
+
+						// 右：工具按钮。刷新保留文字（它是最常用的），其余收成图标 + title
+						h(
+							"div",
+							{ className: "semg-toolbar-util" },
+							h(
+								"button",
+								{
+									type: "button",
+									className: "semg-btn",
+									title: T("action.refresh"),
+									disabled: phase === "working",
+									onClick: () => run(true),
+								},
+								phase === "working"
+									? h("span", { className: "semg-spin semg-spin-sm" })
+									: T("action.refresh"),
+							),
+							url
+								? h(
+										"button",
+										{
+											type: "button",
+											className: "semg-btn",
+											title: T("action.reload"),
+											onClick: () => setReloadKey((k) => k + 1),
+										},
+										"\u21bb",
+									)
+								: null,
+							url
+								? h(
+										"button",
+										{
+											type: "button",
+											className: "semg-btn",
+											title: T("action.reopen"),
+											onClick: () => openExplorerTab(ctx, url, sessionId),
+										},
+										"\u2922",
+									)
+								: null,
+							url
+								? h(
+										"a",
+										{
+											className: "semg-btn",
+											href: url,
+											target: "_blank",
+											rel: "noreferrer",
+											title: T("action.external"),
+										},
+										"\u2197",
+									)
+								: null,
+						),
+					),
+
+					// 第二行：四个分析按钮
+					h(
+						"div",
+						{ className: "semg-toolbar-actions" },
 						ANALYZE_KINDS.map(([kind, key]) =>
 							h(
 								"button",
@@ -632,46 +716,26 @@ window.__ModuleLoader__.load({
 									key,
 									type: "button",
 									className: "semg-btn",
+									title: `${T(key)} — ${T("analyze.tip")}`,
 									disabled: busyKind !== null || phase === "working",
 									onClick: () => runAnalyze(kind),
 								},
-								busyKind === kind ? T("analyze.working") : T(key),
+								busyKind === kind ? h("span", { className: "semg-spin semg-spin-sm" }) : T(key),
 							),
 						),
 					),
-					analysis
-						? h(
-								"div",
-								{
-									className: "semg-box",
-									"data-kind": analysis.ok === true ? "ok" : "error",
-								},
-								analysis.ok === true
-									? [
-											T("analyze.done") + " ",
-											h("b", { key: "label" }, analysis.label || analysis.sessionId || ""),
-											// 自动跳转失败时不装作没事 —— 告诉用户去哪儿找
-											analysis.navigated === false
-												? h("div", { key: "manual", className: "semg-muted" }, T("analyze.manual"))
-												: null,
-											// 图数据没注进去的话这个对话等于没用，必须说清楚
-											analysis.injected === false
-												? h("div", { key: "nodigest", className: "semg-muted" }, T("analyze.noDigest"))
-												: null,
-											analysis.drillable === false
-												? h(
-														"div",
-														{ key: "nodrill", className: "semg-muted" },
-														T("analyze.noDrill"),
-													)
-												: null,
-										]
-									: analysis.code === "graph-missing"
-										? T("analyze.needPrepare")
-										: analysis.error || "未知错误",
-							)
-						: null,
 				),
+
+				banner,
+
+				// ————————————— 图 —————————————
+				url
+					? h(ExplorerFrame, { url, reloadKey })
+					: h(
+							"div",
+							{ className: "semg-viewbody semg-empty" },
+							h("span", null, T("state.emptyHint")),
+						),
 			);
 		}
 
@@ -688,12 +752,58 @@ window.__ModuleLoader__.load({
 		 *
 		 * URL 从 tab.path 读 —— openTab 会把 seed.url 落到这个字段上。
 		 */
+		// ─────────────────── 内嵌的 Explorer（iframe） ───────────────────
+
+		/**
+		 * 把 Semantica 的 Explorer 界面装进一个 iframe，自带加载遮罩。
+		 *
+		 * 从 `ExplorerView` 里抽出来的，好让控制面板能把「工具栏 + 图」拼成
+		 * 同一个页面 —— 以前这是两个标签页，用户得先看信息页、再手动点开图。
+		 *
+		 * iframe 的 `key` 里带 url 和 reloadKey：换会话（url 变了）或点刷新都会
+		 * 重挂载。Explorer 是个 SPA，从外部没法调它的路由，只能整块重来。
+		 * 重挂载后 onLoad 会再触发一次，所以加载遮罩也要跟着复位。
+		 *
+		 * @param props.url        Explorer 基址（空串则不渲染）
+		 * @param props.reloadKey  外部递增这个数字即触发重新加载
+		 */
+		function ExplorerFrame(props) {
+			const url = props.url || "";
+			const reloadKey = props.reloadKey || 0;
+			const [loaded, setLoaded] = useState(false);
+
+			// url 或 reloadKey 变了就把遮罩放回去，否则会一直显示上一张图
+			useEffect(() => {
+				setLoaded(false);
+			}, [url, reloadKey]);
+
+			return h(
+				"div",
+				{ className: "semg-viewbody" },
+				loaded
+					? null
+					: h(
+							"div",
+							{ className: "semg-viewload" },
+							h("div", { className: "semg-spin" }),
+							h("span", null, T("state.loading")),
+						),
+				h("iframe", {
+					key: `${url}#${reloadKey}`,
+					src: url,
+					title: T("tab.title"),
+					sandbox: EXPLORER_IFRAME_SANDBOX,
+					referrerPolicy: "no-referrer",
+					onLoad: () => setLoaded(true),
+				}),
+			);
+		}
+
 		function ExplorerView(props) {
 			ensureStyles();
 			const tab = props.tab || {};
 			const url = typeof tab.path === "string" ? tab.path : "";
 			const [reloadKey, setReloadKey] = useState(0);
-			const [loaded, setLoaded] = useState(false);
 
 			if (!url) {
 				return h(
@@ -717,10 +827,7 @@ window.__ModuleLoader__.load({
 						{
 							type: "button",
 							className: "semg-btn",
-							onClick: () => {
-								setLoaded(false);
-								setReloadKey((k) => k + 1);
-							},
+							onClick: () => setReloadKey((k) => k + 1),
 						},
 						T("action.reload"),
 					),
@@ -730,27 +837,7 @@ window.__ModuleLoader__.load({
 						T("action.external"),
 					),
 				),
-				h(
-					"div",
-					{ className: "semg-viewbody" },
-					loaded
-						? null
-						: h(
-								"div",
-								{ className: "semg-viewload" },
-								h("div", { className: "semg-spin" }),
-								h("span", null, T("state.loading")),
-							),
-					// key 变化即重挂载，等于刷新（Explorer 是 SPA，无法从外部调它的刷新）
-					h("iframe", {
-						key: reloadKey,
-						src: url,
-						title: T("tab.title"),
-						sandbox: EXPLORER_IFRAME_SANDBOX,
-						referrerPolicy: "no-referrer",
-						onLoad: () => setLoaded(true),
-					}),
-				),
+				h(ExplorerFrame, { url, reloadKey }),
 			);
 		}
 

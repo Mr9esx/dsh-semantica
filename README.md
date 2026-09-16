@@ -307,7 +307,7 @@ outgoing_edges = self._adjacency.get(current_id, [])
 
 ## 让 AI 分析这张图（新对话）
 
-控制面板底部有四个按钮：
+控制面板工具栏的第二行有四个按钮：
 
 ```
 复盘这次对话 · 理解图数据 · 检验抽取质量 · 给当前任务的建议
@@ -405,14 +405,62 @@ MessageId(id) { return id }            // 品牌函数，零校验
 所以是**摘要打底 + 可钻取**：新对话自己带了 bash，可以按清单用 `curl` 去查更细的数据。
 Explorer 没起来时降级成纯摘要，并在 digest 里标注「无法钻取」，让模型知道别硬编。
 
-### 一个容易踩的 UI 坑
+## 控制面板的布局
 
-控制面板最早会在图建好之后**自动打开 Explorer 标签**，理由是「用户点按钮就是为了
-看图」。但那会把刚打开的控制面板顶掉：第一次点头部图标 → 面板刚出现就被 Explorer
-替换 → 用户看到的是 semantica 的界面，面板底部的四个分析按钮压根没机会被看到，
-得再点一次图标才回得来。
+**一个页面搞定，不拆成两步。**
 
-现在不自动开了，面板留在原处，要看图点「打开完整 Explorer」。
+```
+┌──────────────────────────────────────────────┐
+│ ⬡ 2186 节点 2737 边 226 实体 253 关系   […]  │ ← 工具栏第 1 行：左边信息、右边工具按钮
+│ [复盘这次对话][理解图数据][检验抽取质量][建议] │ ← 工具栏第 2 行：四个分析按钮
+├──────────────────────────────────────────────┤
+│                                              │
+│        Semantica Knowledge Explorer          │ ← iframe，吃掉剩下的全部高度
+│              （上游原版界面）                  │
+│                                              │
+└──────────────────────────────────────────────┘
+```
+
+- **左**：图的基本信息（节点 / 边 / 实体 / 关系），鼠标悬停出耗时与版本。
+  有过期标记时在旁边挂一个「图已过期」小标签。
+- **右**：工具按钮。刷新保留文字，其余收成图标 —— `↻` 重新载入 Explorer、
+  `⤢` 在独立标签页里放大打开、`↗` 在浏览器里打开。
+- **下面**：整块 iframe，直接装上游的 Explorer。
+
+### 为什么是 iframe，不是自己画
+
+见开头那节。简单说：上游 Explorer 是个打包好的 SPA，要复刻它得重写十几个视图，
+而且永远追不上上游。iframe 是唯一能保证「功能一模一样」的做法。
+
+### 布局演进（两次返工都值得记下来）
+
+**第一版**：控制面板和信息页是两个标签。点按钮 → 看到信息 → 再手动点「打开完整
+Explorer」才看到图。反馈是「太粗暴了，为什么不能套 iframe，上面做个工具栏」。
+确实：信息和图本来就该一起看。现在合成一页。
+
+**第二版之前的坑**：图建好后**自动打开 Explorer 标签**，理由是「用户点按钮就是
+为了看图」。但那会把刚打开的控制面板顶掉 —— 第一次点头部图标，面板刚出现就被
+Explorer 替换，用户看到的是 semantica 界面，四个分析按钮压根没机会被看到，得再
+点一次图标才回得来。所以既不自动开标签，也不再需要「打开完整 Explorer」这个动作。
+
+### 一个只有真浏览器才能发现的 CSS 坑
+
+第一版工具栏把八个按钮塞进同一个 `flex-wrap` 容器，看着没问题。实测在 320px 的
+侧边栏里**横向溢出 315px**，按钮被裁掉一半：
+
+```css
+/* 错的 */
+.semg-toolbar-actions{display:flex;flex-wrap:wrap;flex:0 0 auto}
+```
+
+`flex:0 0 auto` 的第三个值是 flex-basis，`auto` 意味着**内容宽度**（八个按钮约
+625px）。容器自己不收缩，内部的 `flex-wrap` 就永远不触发 —— 它以为宽度够，其实是
+溢出了。改成 `flex:0 1 auto` 并加 `min-width:0` 才会真正换行。
+
+所有单元测试当时都是绿的：`renderToString` 只吐 HTML 字符串，不含任何几何信息。
+所以 `scripts/visual-check.mjs` 用真 Chromium 在 300/320/420/520/640/720 六个宽度下
+量溢出、量重叠、量「工具栏 + 图 = 面板高度」，并确认 iframe 里真的渲染出了
+Explorer（跨源 + sandbox 下会不会白屏）。
 
 ---
 
@@ -425,12 +473,13 @@ Explorer 没起来时降级成纯摘要，并在 digest 里标注「无法钻取
 │ 头部按钮            │                │ /api-semantica/prepare   │    │ graph_worker.py    │
 │  └ 打开控制面板     │─── POST ─────▶│ /api-semantica/analyze   │───▶│  ├ NER             │
 │ 控制面板 tab        │                │   ├ session-reader       │    │  ├ RelationExtract │
-│  └ 进度/统计/报错   │                │   ├ bridge（常驻 worker）  │NDJSON│ └ ContextGraph     │
-│  └ 四个分析按钮      │◀── URL/childId│   ├ explorer（进程管理）   │    │ └ ContextGraph     │
-│ Explorer tab       │                │   └ analyze（建新对话+注入）│    └────────────────────┘
-│  └ iframe: 上游 UI  │◀─── iframe ────│  127.0.0.1:<动态端口>      │◀─── semantica-explorer
-└────────────────────┘                └───────────┬──────────────┘
-                                                  │ agents.create(seed)
+│  ├ 工具栏第1行      │                │   ├ bridge（常驻 worker）  │NDJSON│ └ ContextGraph     │
+│  │  ├ 左：基本信息  │◀── URL+stats ──│   ├ explorer（进程管理）   │    │ └ ContextGraph     │
+│  │  └ 右：工具按钮  │                │   └ analyze（建新对话+注入）│    └────────────────────┘
+│  ├ 工具栏第2行      │◀── sessionId ──│  127.0.0.1:<动态端口>      │◀─── semantica-explorer
+│  │  └ 四个分析按钮  │                └───────────┬──────────────┘
+│  └ iframe: 上游 UI  │◀─── iframe ────────────────┘
+└────────────────────┘                            │ sessionController.create
                                         ┌─────────▼──────────┐
                                         │ 新对话（会话列表）   │
                                         └────────────────────┘
@@ -444,8 +493,9 @@ Explorer 没起来时降级成纯摘要，并在 digest 里标注「无法钻取
 | `src/explorer.js` | `semantica-explorer` 子进程管理：空闲端口分配、健康检查、就绪超时、按会话缓存、总量上限、空闲与 LRU 回收，以及依赖探测 |
 | `src/analyze.js` | 四段分析提问 + digest 组装 + 开新对话并注入。零外部依赖（原因见上） |
 | `src/graph_worker.py` | Python 侧：markdown 归一化、逐段抽实体/关系、组装 ContextGraph 并落盘 |
-| `src/client.js` | 浏览器半侧：头部按钮 + 控制面板 tab（进度、统计、报错与修复指引、四个分析按钮）+ Explorer tab（自己渲染的 iframe） |
+| `src/client.js` | 浏览器半侧：头部按钮 + 控制面板 tab（工具栏：基本信息 + 工具按钮 + 四个分析按钮；下面是内嵌 Explorer 的 iframe）+ 独立的 Explorer tab（放大用） |
 | `scripts/install.mjs` | 装/卸 profile，自动备份 manifest |
+| `scripts/visual-check.mjs` | 真 Chromium 下量排版（溢出/重叠/高度）并确认 iframe 里渲染出了 Explorer。布局类改动必跑 |
 
 ### 几个刻意的取舍
 
