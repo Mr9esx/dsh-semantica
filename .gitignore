@@ -1,0 +1,13 @@
+# 依赖
+node_modules/
+
+# Python 编译产物（跑 py_compile 会生成）
+__pycache__/
+*.pyc
+
+# 系统与编辑器杂物
+.DS_Store
+*.log
+*.tmp
+*.bak
+*.orig

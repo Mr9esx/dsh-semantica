@@ -1,0 +1,10 @@
+# dsh-semantica-graph bundle patch.
+#
+# Host half (package root) registers /api-semantica/* routes and bridges to the
+# Python `semantica` package over a persistent child process. The browser half
+# (dsh.client) is discovered automatically through the package's dsh.client
+# declaration + exports["./client"].
+
+- insert:
+    - id: semantica-graph
+      name: dsh-semantica-graph
