@@ -505,6 +505,10 @@ def build_context_graph(payload):
         if tc.get("id") is not None:
             anchor_of[str(tc.get("id"))] = f"tool:{tc.get('id')}"
 
+    # 已知会建出节点的 tool id —— `edge()` 不校验端点是否存在，只连真的有的，
+    # 免得留下悬空边。
+    known_tools = {f"tool:{tc.get('id')}" for tc in tool_calls if tc.get("id") is not None}
+
     for m in messages:
         mid = f"msg:{m.get('id')}"
         node(mid, "message", {
@@ -515,6 +519,18 @@ def build_context_graph(payload):
         })
         if m.get("turn") is not None:
             edge(f"turn:{m.get('turn')}", mid, "contains")
+        # 这条消息调了哪些工具。
+        #
+        # 原本图里只有 `turn --contains--> tool`，消息和它调用的工具只是「同一个轮次里
+        # 的两个兄弟」，没有直接边 —— 于是「这条结论是跑哪几条命令得出的」走不通。
+        # Explorer 的 /neighbors 和 /chain 又都只走出边，所以 msg→tool 必须是这个方向
+        # （反过来 tool→msg 是入边，加了也点不动，只会多一堆边）。
+        #
+        # 会成环吗：不会。`get_neighbors` 里 `visited = {node_id}` 是 BFS 去重的
+        # （semantica/context/context_graph.py），环安全。
+        for cid in m.get("toolCallIds") or []:
+            if f"tool:{cid}" in known_tools:
+                edge(mid, f"tool:{cid}", "calls", props={"kind": "tool-call"})
 
     for tc in tool_calls:
         cid = f"tool:{tc.get('id')}"

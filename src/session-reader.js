@@ -295,6 +295,23 @@ export function buildConversation(events, opts = {}) {
   const decisions = []
   let title = null
 
+  // 当前轮次游标。
+  //
+  // 为什么需要它：`user/message` 事件的 data 里**没有 `turn` 字段**（顶层键只有
+  // content / source / role / id），assistant/message、tool/call、step/start 都有。
+  // 所以 `d.turn ?? null` 对用户消息永远是 null，graph_worker 那句
+  // `if m.get("turn") is not None` 就不建 `turn --contains--> msg` 边 ——
+  // 用户消息成了孤儿节点。
+  //
+  // 实测后果（223 节点 / 4 轮的会话）：4 条用户消息全部脱链，它们提到的实体跟着
+  // 一起被拖进独立连通分量，`component_sizes=[216,5,1,1]`。孤岛里恰好是「构建失败
+  // 退出码 1」这条关键证据，而讲这件事的 assistant 消息在主分量里 —— AI 分析时会
+  // 报告「孤岛承载的证据是主结论的核心，却没被连上」，看着像图坏了，实际是这里漏了。
+  //
+  // 修法：轮次由 `turn/start` 开启，往后的事件都归它，直到下一个 `turn/start`。
+  // 有显式 `turn` 的以显式为准，没有的用游标兜底。
+  let currentTurn = null
+
   const callIndex = new Map()
 
   for (const e of events) {
@@ -305,9 +322,12 @@ export function buildConversation(events, opts = {}) {
         if (typeof d.title === 'string') title = d.title
         break
 
-      case 'turn/start':
-        turns.push({ turn: d.turn ?? turns.length + 1, seq: e.seq, time: e.time, steps: 0 })
+      case 'turn/start': {
+        const t = d.turn ?? turns.length + 1
+        currentTurn = t
+        turns.push({ turn: t, seq: e.seq, time: e.time, steps: 0 })
         break
+      }
 
       case 'step/start': {
         const t = turns.find((x) => x.turn === d.turn)
@@ -332,11 +352,11 @@ export function buildConversation(events, opts = {}) {
           role: 'user',
           seq: e.seq,
           time: e.time,
-          turn: d.turn ?? null,
+          turn: d.turn ?? currentTurn,
           text,
           excerpt: clip(text, 160),
         })
-        segments.push({ source: `user:${e.seq}`, role: 'user', seq: e.seq, time: e.time, turn: d.turn ?? null, text })
+        segments.push({ source: `user:${e.seq}`, role: 'user', seq: e.seq, time: e.time, turn: d.turn ?? currentTurn, text })
         break
       }
 
@@ -344,13 +364,23 @@ export function buildConversation(events, opts = {}) {
         const blocks = d.message?.content ?? d.content
         const text = textOf(blocks)
         if (!text) break
+        // 这条消息调了哪些工具 —— 块的 id 就是 tool/call 的 callId，两边能直接对上。
+        //
+        // 为什么要单独记：图里原本只有 `turn --contains--> tool`，没有
+        // `msg --calls--> tool`，于是「这条结论是跑哪几条命令得出的」在图上是断的。
+        // 实测这段信息在日志里 100% 齐全（90 条 assistant 消息带 129 个 tool-call 块，
+        // callId 与 tool/call 事件 129/129 全部匹配），只是没被用。
+        const toolCallIds = (Array.isArray(blocks) ? blocks : [])
+          .filter((b) => b && b.type === 'tool-call' && typeof b.id === 'string')
+          .map((b) => b.id)
         messages.push({
           id: `assistant:${e.seq}`,
           role: 'assistant',
           seq: e.seq,
           time: e.time,
-          turn: d.turn ?? null,
+          turn: d.turn ?? currentTurn,
           step: d.step ?? null,
+          toolCallIds,
           text,
           excerpt: clip(text, 160),
         })
@@ -359,7 +389,7 @@ export function buildConversation(events, opts = {}) {
           role: 'assistant',
           seq: e.seq,
           time: e.time,
-          turn: d.turn ?? null,
+          turn: d.turn ?? currentTurn,
           text,
         })
         break
@@ -374,7 +404,7 @@ export function buildConversation(events, opts = {}) {
           name: d.name ?? 'tool',
           seq: e.seq,
           time: e.time,
-          turn: d.turn ?? null,
+          turn: d.turn ?? currentTurn,
           step: d.step ?? null,
           args: d.arguments ?? '',
           resultText: '',

@@ -225,8 +225,12 @@ digest 和「理解图数据」的提问里都直接写了端点路径。这些�
 
 1. digest 里明确写出**权威来源是 `GET <base>/openapi.json`**（78 个 path / 82 个 operation），
    并提示写错时返回的是那个 detail 字符串。
-2. `node scripts/check-endpoints.mjs` 把 `src/analyze.js` 里出现的每个 `/api/...` 拿去和
-   真实 openapi.json 对账，对不上就非 0 退出。举例子用的具体 id（`ent:xxx`）按占位符处理。
+2. `node scripts/check-endpoints.mjs` 拿真节点 id 把每个端点**实际调一次**。只查路由存在
+   是不够的——实测 `/api/graph/node/<id>/path` 在 openapi 里**存在**、路由检查会通过，但对
+   任何 id 都返回 404 `Source node ... not found`。实调这一步又抓出两个：`?limit=` 空值会被
+   FastAPI 判 **422**（`Input should be a valid integer`），digest 里照抄那个字面量就会拿到 422。
+   digest 里刻意写成「别用」的两条（不可用的 `/path`、会 503 的 `semantic-neighborhood`）
+   用行尾 `// check-endpoints: ignore` 排除，免得把警告当成推荐用法。
 
 实测（446 节点 / 519 边的真实图）确认过的几个事实：
 
@@ -238,6 +242,11 @@ digest 和「理解图数据」的提问里都直接写了端点路径。这些�
   （同一张图：0.002615 对 0.005230）。两个都对，别混着比。
 - 搜索有两条路：`GET /api/graph/nodes?search=` 会给全部命中（实测 54 条），
   `POST /api/graph/search` 走相关性排序、默认 limit 20。
+- **实体层的边是锚点局部的**：一个实体只连到字面包含它的那段文本。所以用户贴的关键证据
+  （报错原文）不会连到讨论它的 assistant 消息上，除非那些消息也字面提到了同一串词。
+  实测：讲「构建失败」的 3 条 assistant 消息各带 7/6/5 个实体，但没有一个是那条证据。
+  这是 mention 式抽取的固有性质，不是图坏了——模型分不清「抽样损失」和「抽取缺陷」，
+  所以 digest 里现在把这句话直接写给它。
 
 ## 已知限制
 

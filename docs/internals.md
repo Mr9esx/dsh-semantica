@@ -88,6 +88,51 @@ outgoing_edges = self._adjacency.get(current_id, [])
 
 ---
 
+## 图结构：节点与边
+
+节点五类：`turn` / `message` / `tool` / `decision` / `entity`。
+
+边六类，方向都是父→子或同级，**没有一条反向边**：
+
+| 边 | 从 → 到 | 含义 |
+| --- | --- | --- |
+| `contains` | `turn:N` → `msg:<seq>` | 这条消息属于第 N 轮 |
+| `contains` | `turn:N` → `tool:<callId>` | 这次调用发生在第 N 轮 |
+| `contains` | `turn:N` → `dec:<...>` | 这条决策产生于第 N 轮 |
+| `calls` | `msg:<seq>` → `tool:<callId>` | **这条消息调用了这个工具** |
+| `mentions` | `msg` / `tool` → `entity` | 这段文本里抽出了这个实体 |
+| `related_to` | `entity` → `entity` | 关系抽取出的实体间关系 |
+| `decided_at` | `dec` → `tool:<callId>` | 决策来自哪次提问（提问工具节点必然存在、出边为 0） |
+| `next_decision` | `dec` → `dec` | 决策时序链，见「决策层」 |
+
+### 为什么必须自己补 `msg → tool`
+
+原本只有 `turn --contains--> tool`，消息和它调用的工具只是「同一个轮次里的两个兄弟」，没有直接边。于是「这条结论是跑哪几条命令得出的」在图上是断的——实测一张 223 节点的图，从 assistant 消息出发沿出边走只能碰到 **26 个节点**，129 个 tool 里一个都到不了。
+
+数据一直是齐的：assistant 消息的 `tool-call` 块的 `id` 就是 `tool/call` 事件的 `callId`，实测 129 个块 **129/129 全部匹配**。补上 `calls` 边之后可达节点 26 → 105，129 个 tool 里 79 个可达。
+
+剩下的 50 个到不了，是因为它们所属的 assistant 消息**只有 tool-call 块、没有正文**，被 `if (!text) break` 丢掉了（39 条这样的消息）。这是刻意的：不建空壳节点。那些工具仍然能从 `turn` 走到底。
+
+### `user/message` 没有 `turn` 字段
+
+**这是个真 bug，踩了很久才发现。**
+
+`turn/start`、`assistant/message`、`tool/call`、`step/start` 事件的 data 里都带 `turn`，唯独 **`user/message` 不带**——它的顶层键只有 `content / source / role / id`。所以 `turn: d.turn ?? null` 对用户消息永远是 null，`graph_worker` 那句 `if m.get("turn") is not None` 就不建边，用户消息成了孤儿节点。
+
+后果不只是「少一条边」。用户消息是贴证据的地方（报错原文、日志），它提到的实体跟着一起被拖进独立连通分量。实测那 223 节点的会话：`num_components=4`、`component_sizes=[216,5,1,1]`，5 节点孤岛里正好是「构建失败退出码 1」这条关键证据。AI 分析时会报告「孤岛承载的证据恰恰是主结论的核心，却没有被连到讲这件事的 assistant 消息上」——看着像图坏了，实际是这里漏了。
+
+修法是加一个轮次游标：轮次由 `turn/start` 开启，往后的事件都归它，有显式 `turn` 的以显式为准。修完 `contains` 边 186 → 190，连通分量 4 → 1。
+
+### 为什么不加反向边
+
+Explorer 的 `/neighbors` 和 `/chain` 都只走出边（`ContextGraph.get_neighbors` 只读 `_adjacency`），所以从 `tool` 节点出发一步都走不了——出去只有入边。看上去加一条 `msg --in_turn--> turn` 就能解决。
+
+不要加。`turn:1` 的出边有 46 条（实测 4 轮 186 条），加了反向边之后从任意消息出发就会 fan-out 到整个轮次——这正是「决策层」那节记的 412 节点爆链的同一个坑。
+
+根因在 schema 的层级性：这是一棵父→子的树，能从上往下读，不能从下往上读。要么接受这个方向，要么用 `/api/graph/edges` 自己反查（digest 里就是这么写的）。注意 `/api/graph/path` 那条路**走不通**——它对本图里任何 id 都返回 `Source node ... not found`，连 `/neighbors` 查得到的节点也一样。
+
+---
+
 ## 抽取层
 
 ### 排除模型的思考过程（reasoning）
