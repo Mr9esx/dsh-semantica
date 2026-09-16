@@ -35,7 +35,56 @@
 // 数据会整个糊在用户气泡里。
 
 import { randomUUID } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+
+/**
+ * 把一次失败**完整**落盘（message + stack + cause 链），返回文件路径。
+ *
+ * 为什么需要它：`sessionController.prompt()` 抛出来的错误只有一行 message
+ * （实测：「Cannot read properties of undefined (reading 'throwIfAborted')」），
+ * 光看这行根本不知道是哪一层 —— 调用栈才有答案。而错误穿过几层 catch 之后栈就
+ * 丢了，DSH 自己的进程日志里也翻不到。
+ *
+ * 所以直接把栈写到图文件旁边。出问题读这个文件就行，不用去翻进程日志。
+ *
+ * @param graphPath 图文件路径（借它的目录；顺手也记下是哪个会话）
+ */
+export function dumpFailure(graphPath, sessionId, kind, err) {
+  if (!graphPath) return null
+  try {
+    const file = join(dirname(graphPath), 'last-analyze-error.txt')
+    const lines = [
+      `when      : ${new Date().toISOString()}`,
+      `sessionId : ${sessionId}`,
+      `kind      : ${kind}`,
+      '',
+    ]
+    // cause 链也要走完：TypertRemoteFailure 常常把真错误塞在 cause 里
+    let e = err
+    for (let depth = 0; e && depth < 8; depth++) {
+      lines.push(`[${depth}] ${e.name || 'Error'}: ${e.message}`)
+      if (e.code !== undefined) lines.push(`      code    : ${String(e.code)}`)
+      if (e.details !== undefined) {
+        let d
+        try {
+          d = JSON.stringify(e.details)
+        } catch {
+          d = String(e.details)
+        }
+        lines.push(`      details : ${d}`)
+      }
+      if (typeof e.stack === 'string') {
+        for (const row of e.stack.split('\n').slice(0, 25)) lines.push(`      ${row}`)
+      }
+      e = e.cause
+    }
+    writeFileSync(file, lines.join('\n') + '\n')
+    return file
+  } catch {
+    return null
+  }
+}
 
 // ## 为什么不 import `@deepseek-ai/dsh-llm`
 //
@@ -433,7 +482,7 @@ function findWorkspace(ctx, parentSessionId, cwd) {
  * @returns {Promise<{ok: true, sessionId: string, label: string, digestChars: number, injected: boolean}
  *                 | {ok: false, code: string, error: string, sessionId?: string}>}
  */
-export async function createAnalysisSession(ctx, { sessionId, kind, digest, label }) {
+export async function createAnalysisSession(ctx, { sessionId, kind, digest, label, graphPath }) {
   const spec = ANALYSIS_KINDS[kind]
   if (!spec) return { ok: false, code: 'unknown-kind', error: `未知的分析类型：${kind}` }
 
@@ -553,13 +602,56 @@ export async function createAnalysisSession(ctx, { sessionId, kind, digest, labe
     await sc.prompt({
       sessionId: newId,
       content: [{ type: 'text', text: spec.prompt }],
+      // GUI 走 RPC 时会带上 requestId，它会进 source.rpcId。裸调时补一个，
+      // 免得落一条 rpcId 为 undefined 的用户消息。
+      requestId: randomUUID(),
     })
   } catch (err) {
+    // 兜底：`prompt()` 内部真正做的最后一步就是 `agent.followup(message)`，
+    // 也就是唤醒驱动。它前面还有 resolveAgent / selectionFor / routeServed，
+    // 那几行**不在 admit() 的 try 里**，抛出来的错是裸的、不会被包成
+    // `agent-busy`。实测就是这个：
+    //     Cannot read properties of undefined (reading 'throwIfAborted')
+    // 其中 resolveAgent 返回的是 `{ agent }` 包装对象（对照 typert 那边的
+    // `return found.agent` 可以确认它是要解包的），而 prompt() 直接当 agent 用。
+    // 与其猜，不如自己走最后那一步 —— 效果一样，还绕开了会抛错的前半段。
+    const fallback = ctx.get('agents')?.get(newId)
+    if (fallback && typeof fallback.followup === 'function') {
+      try {
+        fallback.followup(
+          userMessage({
+            content: [{ type: 'text', text: spec.prompt }],
+            source: { kind: 'plugin', plugin: 'dsh-semantica-graph' },
+          }),
+        )
+        ctx.logger?.info?.('[semantica-graph] prompt 失败，已用 agent.followup 兜底唤醒')
+        return {
+          ok: true,
+          sessionId: newId,
+          label,
+          digestChars: digest.length,
+          injected,
+          viaFollowup: true,
+        }
+      } catch (err2) {
+        return {
+          ok: false,
+          code: 'prompt-failed',
+          error: `对话已建好但提问失败：${err?.message ?? err}`,
+          sessionId: newId,
+          detail: `prompt: ${err?.message ?? err} / followup: ${err2?.message ?? err2}`,
+          stackFile: dumpFailure(graphPath, sessionId, kind, err) ?? undefined,
+        }
+      }
+    }
     return {
       ok: false,
       code: 'prompt-failed',
+      // 「对话已建好但提问失败」这句必须留着 —— 用户得知道那条空对话是真的建出来了。
       error: `对话已建好但提问失败：${err?.message ?? err}`,
       sessionId: newId,
+      detail: err?.code !== undefined ? String(err.code) : undefined,
+      stackFile: dumpFailure(graphPath, sessionId, kind, err) ?? undefined,
     }
   }
 

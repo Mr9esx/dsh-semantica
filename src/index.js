@@ -33,6 +33,7 @@ import {
   ANALYSIS_LABEL_PREFIX,
   buildDigest,
   createAnalysisSession,
+  dumpFailure,
   isAnalysisKind,
   readGraph,
 } from './analyze.js'
@@ -327,6 +328,9 @@ function apply(ctx) {
       kind: 'exact',
       path: '/api-semantica/analyze',
       handler: async (req, res) => {
+        // 声明提到 try 外面：catch 里要用它当落盘目录，而 readBody/prepareGraph
+        // 都可能先抛错 —— 那时 `const` 还在 TDZ，catch 里引用它会再炸一次。
+        let graphPath
         try {
           const body = await readBody(req)
           const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
@@ -353,7 +357,7 @@ function apply(ctx) {
             prepared = graphCache.get(sessionId)
           }
 
-          const graphPath = prepared?.stats?.graphPath ?? graphPathFor(sessionId)
+          graphPath = prepared?.stats?.graphPath ?? graphPathFor(sessionId)
           const graph = readGraph(graphPath)
           if (!graph) {
             send(res, 200, {
@@ -375,7 +379,7 @@ function apply(ctx) {
           })
 
           const label = ANALYSIS_LABEL_PREFIX + ANALYSIS_KINDS[kind].label
-          const out = await createAnalysisSession(ctx, { sessionId, kind, digest, label })
+          const out = await createAnalysisSession(ctx, { sessionId, kind, digest, label, graphPath })
           if (!out.ok) {
             send(res, 200, out)
             return
@@ -388,15 +392,21 @@ function apply(ctx) {
             digestChars: out.digestChars,
             // 图数据有没有真的注进去。false 时前端会提示「只有提问、没有背景数据」。
             injected: out.injected,
+            // prompt 抛错时走了 agent.followup 兜底。对话照样开工了，
+            // 但记一笔，出问题好查。
+            viaFollowup: out.viaFollowup === true,
             nodes: graph.nodes.length,
             edges: graph.edges.length,
             drillable: Boolean(running?.url),
           })
         } catch (err) {
+          // 兜底：`createAnalysisSession` 之外的失败（读图、buildDigest…）也落一份栈，
+          // 免得又出现「只有一行 message、不知道哪一层」的情况。
           send(res, 200, {
             ok: false,
             code: 'error',
             error: String(err?.message ?? err),
+            stackFile: dumpFailure(graphPath, sessionId, kind, err) ?? undefined,
           })
         }
       },
