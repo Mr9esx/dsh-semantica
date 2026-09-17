@@ -23,8 +23,17 @@ import { join } from 'node:path'
 
 import { ExplorerHost, probeExplorer, resolvePython } from './explorer.js'
 import { analyze, graphMtime, readGraph, scopeGraph, summarize, writeGraphFile } from './kg.js'
-import { SECTION_NAME, SECTION_ORDER, SECTION_TEXT, SESSION_VARIABLE, instructionFor } from './prompt.js'
-import { resolveDshHome, sessionWindow } from './session.js'
+import {
+	DIRECTIVE_VARIABLE,
+	SECTION_NAME,
+	SECTION_ORDER,
+	SECTION_TEXT,
+	SESSION_VARIABLE,
+	directiveFor,
+	instructionFor,
+} from './prompt.js'
+import { resolveDshHome } from './session.js'
+import { createToggleStore } from './toggle.js'
 
 const name = 'semantica-graph'
 
@@ -118,6 +127,11 @@ function kgPath(home) {
 	return join(home, DATA_DIR, 'kg.json')
 }
 
+/** 「每轮自动提取」开关的落盘位置。 */
+function autoPath(home) {
+	return join(home, DATA_DIR, 'auto-extract.json')
+}
+
 /** 界面诊断落盘的位置。 */
 function diagPath(home) {
 	return join(home, DATA_DIR, 'last-diag.json')
@@ -144,15 +158,16 @@ async function loadScoped(ctx, sessionId, mode) {
 		err.kgPath = path
 		throw err
 	}
-	const win = await sessionWindow(ctx, sessionId)
-	const scoped = scopeGraph(graph, { sessionId, mode, window: win })
-	return { graph, scoped, home, kg: { path, mtime: graphMtime(path), bytes: graph.bytes }, window: win }
+	const scoped = scopeGraph(graph, { sessionId, mode })
+	return { graph, scoped, home, kg: { path, mtime: graphMtime(path), bytes: graph.bytes } }
 }
 
 function apply(ctx, config) {
 	const home = resolveDshHome()
 	const cfg = config ?? {}
 	const wantsPrompt = cfg.injectPrompt !== false
+	// 开关状态（每会话一份）。提示词变量 provider 要**同步**读它，所以是内存 + 落盘。
+	const autos = createToggleStore(autoPath(home))
 
 	// ── 1) 把「本会话标识 + 写入规则」交给模型 ───────────────────────────────
 	//
@@ -180,6 +195,16 @@ function apply(ctx, config) {
 							(context) => context?.agent?.session?.header?.id ?? '',
 						),
 					'semantica-graph.variable()',
+				)
+				// 「写入准则」也得是个变量：它跟着「每轮自动提取」开关变，而段落正文
+				// 注册一次就固定了。变量每次组装提示词时求值 —— 开关一翻，下一轮就生效。
+				pctx.effect(
+					() =>
+						sp.variable(DIRECTIVE_VARIABLE, (context) => {
+							const id = context?.agent?.session?.header?.id ?? ''
+							return directiveFor(id, autos.isOn(id))
+						}),
+					'semantica-graph.directive()',
 				)
 				variableReady = true
 			} catch (err) {
@@ -241,9 +266,35 @@ function apply(ctx, config) {
 							hint: probe.hint ?? null,
 							running: explorers.snapshot(),
 						},
-						prompt: { injected: wantsPrompt, section: SECTION_NAME },
+						prompt: { injected: wantsPrompt, section: SECTION_NAME, directive: DIRECTIVE_VARIABLE },
+						auto: { on: autos.isOn(sessionId) },
 						instruction: sessionId ? instructionFor(sessionId) : null,
 					})
+				} catch (err) {
+					send(res, 200, { ok: false, error: String(err?.message ?? err) })
+				}
+			},
+		})
+
+		// —— 每轮自动提取：查 / 改开关 ——
+		//
+		// 开关本身不「执行」任何提取：提取只能由模型调 MCP 工具完成。它改变的是**规则**——
+		// 打开之后，每次组装提示词时 DIRECTIVE_VARIABLE 会给模型一段「每轮回复结束前必须
+		// 把这一轮写进图谱」的强制要求。所以它替代的是「把提取指令粘进对话」这个动作。
+		ws.register({
+			kind: 'exact',
+			path: '/api-semantica/auto',
+			handler: async (req, res) => {
+				try {
+					const body = await readBody(req)
+					const sessionId = String(body?.sessionId ?? '')
+					if (!sessionId) {
+						send(res, 200, { ok: false, error: '缺少 sessionId' })
+						return
+					}
+					const on = autos.set(sessionId, body?.on === true)
+					note(ctx, 'debug', `semantica-graph: 会话 ${sessionId} 每轮自动提取 → ${on ? '开' : '关'}`)
+					send(res, 200, { ok: true, on })
 				} catch (err) {
 					send(res, 200, { ok: false, error: String(err?.message ?? err) })
 				}

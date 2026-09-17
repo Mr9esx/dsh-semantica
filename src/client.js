@@ -62,18 +62,29 @@ window.__ModuleLoader__.load({
 			"stat.relations": "关系",
 			"stat.decisions": "决策",
 			"state.loading": "正在打开图…",
+			"state.loadSlow": "图没打开：Explorer 没有响应",
+			"state.loadSlowHint": "多半是它已经被回收或者刚被重启过。点「重试」重新拉起一个；如果总是这样，去面板里看 Explorer 依赖是否齐全。",
+			"action.retry": "重试",
+			"auto.off": "每轮提取：关",
+			"auto.on": "每轮提取：开",
+			"auto.offHint": "关着的时候，模型只在它觉得值得记的时候写图。点一下改成「每轮都写」。",
+			"auto.onHint": "开着的时候，模型每一轮回复结束前都要把这一轮的新知识写进图（会多花一些 token）。点一下关掉。",
+			"auto.ctaOn": "开启每轮自动提取",
+			"auto.ctaHint": "开这个开关，比每次粘指令省事：模型每一轮都会自己把新知识写进图。",
+			"auto.turnedOn": "已开启「每轮自动提取」—— 从下一轮对话开始生效。",
 			"state.emptyHint": "还没有可显示的内容",
 			"state.noKg": "这台机器上还没有写过任何知识图谱",
 			"state.noKgHint": "图由模型通过 mcp__semantica__ 工具写入。把下面这段指令粘进对话，让它把这次对话抽进去：",
 			"state.noNodes": "本对话在图里还没有节点",
-			"state.noNodesHint": "图里有别的会话写入的内容。点「复制提取指令」让模型把这次对话也写进去，或者切到「全部」看整张图。",
+			"state.noNodesHint":
+				"图里有别的会话写入的内容。开下面这个开关，模型从下一轮开始就会自己写进来；也可以点「复制提取指令」当场补一次，或者切到「全部」看整张图。",
 			"state.taggedOnly": "本对话 {n} 个节点",
 			"state.claimByEntity": "按实体边认领 {n} 条决策",
-			"state.claimByTime": "按时间认领 {n} 条决策",
+			// 曾经有「按时间认领」这句 —— 那条兜底规则会把别的会话的决策算进来，已删除
 			"state.untaggedNote": "图里还有 {n} 个节点没打会话标，只出现在「全部」里",
 			"state.hostMissing": "插件的 host 半侧还没加载",
 			"state.hostMissingHint":
-				"/api-semantica 没有任何路由响应。改过 host 代码（src/index.js 等）需要重启 DSH Desktop；只改浏览器半侧刷新页面即可。",
+				"/api-semantica 没有任何路由响应。改过 host 代码（src/index.js 等）时 harness 一般会自动热重载；要是一直这样，重启 DSH Desktop。只改浏览器半侧刷新页面即可。",
 			"state.explorerMissing": "Explorer 依赖不可用",
 			"state.mcpMissing": "MCP 工具没挂上：profile 里看不到 mcp-semantica 条目，模型写不进图。",
 			"analysis.title": "分析",
@@ -112,20 +123,30 @@ window.__ModuleLoader__.load({
 			"stat.relations": "relations",
 			"stat.decisions": "decisions",
 			"state.loading": "Opening graph…",
+			"state.loadSlow": "The graph did not open: Explorer is not responding",
+			"state.loadSlowHint": "It was probably reaped or just restarted. Retry to start a fresh one.",
+			"action.retry": "Retry",
+			"auto.off": "Per-turn extract: off",
+			"auto.on": "Per-turn extract: on",
+			"auto.offHint": "When off, the model only writes when it judges something worth keeping. Click to write every turn.",
+			"auto.onHint": "When on, the model must write this turn's new knowledge before finishing (costs extra tokens). Click to turn off.",
+			"auto.ctaOn": "Turn on per-turn extraction",
+			"auto.ctaHint": "Cheaper than pasting the instruction every time: the model writes each turn by itself.",
+			"auto.turnedOn": "Per-turn extraction is on — effective from the next turn.",
 			"state.emptyHint": "Nothing to show yet",
 			"state.noKg": "No knowledge graph has been written on this machine yet",
 			"state.noKgHint":
 				"The graph is written by the model through the mcp__semantica__ tools. Paste this prompt into the chat:",
 			"state.noNodes": "This chat has no nodes in the graph yet",
 			"state.noNodesHint":
-				"The graph holds other chats' content. Use “Copy extract prompt” to have the model write this one, or switch to “All”.",
+				"The graph holds other chats' content. Turn on the switch below and the model writes from the next turn on; you can also copy the prompt to backfill now, or switch to “All”.",
 			"state.taggedOnly": "{n} nodes in this chat",
 			"state.claimByEntity": "{n} decisions claimed by entity edges",
 			"state.claimByTime": "{n} decisions claimed by time",
 			"state.untaggedNote": "{n} nodes carry no conversation tag (visible under “All”)",
 			"state.hostMissing": "The plugin's host half is not loaded",
 			"state.hostMissingHint":
-				"Nothing answers /api-semantica. Host-side changes (src/index.js etc.) need a DSH Desktop restart; browser-side changes only need a refresh.",
+				"Nothing answers /api-semantica. Host-side changes (src/index.js etc.) are usually hot-reloaded by the harness; if it stays like this, restart DSH Desktop. Browser-side changes only need a refresh.",
 			"state.explorerMissing": "Explorer dependencies unavailable",
 			"state.mcpMissing": "MCP tools are not attached: no mcp-semantica row in the profile.",
 			"analysis.title": "Analysis",
@@ -174,6 +195,10 @@ window.__ModuleLoader__.load({
 [data-semgp-stats] b{font-weight:600;font-size:12px}
 [data-semgp-btn]{font-size:12px;line-height:18px;padding:3px 10px;border:1px solid rgba(128,128,128,.35);border-radius:7px;background:transparent;color:inherit;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:5px;font-family:inherit}
 [data-semgp-btn]:hover{background:rgba(128,128,128,.14)}
+/* 每轮自动提取的开关：开着要一眼看得出来，不然用户不知道自己有没有点开 */
+[data-semgp-auto="on"]{background:rgba(46,160,67,.16);border-color:rgba(46,160,67,.55);font-weight:600}
+[data-semgp-auto="on"]:hover{background:rgba(46,160,67,.24)}
+[data-semgp-auto="off"]{opacity:.72}
 [data-semgp-btn][disabled]{opacity:.5;cursor:default}
 [data-semgp-path]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52ch}
 [data-semgp-body]{position:relative;flex:1 1 auto;min-height:0;display:flex}
@@ -499,6 +524,12 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * iframe 加载的上限。超过它还没 load，就认定「Explorer 没起来」而不是继续转圈 ——
+		 * 死掉的端口不会有任何事件回调，只能靠时间兜。
+		 */
+		const LOAD_TIMEOUT_MS = 15_000;
+
+		/**
 		 * 图谱画布的占位元素 —— 真正渲染 iframe 的是 frameHost，这里只报告自己占哪儿。
 		 *
 		 * 组件卸载时 iframe **不动**（还在宿主里），只把宿主藏起来，所以切标签回来是
@@ -511,6 +542,18 @@ window.__ModuleLoader__.load({
 			// （复用的 iframe 不会再触发一次 load 事件）。
 			const [loaded, setLoaded] = useState(() => Boolean(url) && frameHost.loadedUrl === url);
 			const holder = useRef(null);
+			// iframe 指向的 Explorer 如果已经死了（进程被回收/插件刚热重载过），
+			// load 事件永远不来，面板就会一直停在「正在打开图…」。所以给它一个上限。
+			const [slow, setSlow] = useState(false);
+
+			useEffect(() => {
+				if (loaded || !url) {
+					setSlow(false);
+					return undefined;
+				}
+				const timer = setTimeout(() => setSlow(true), LOAD_TIMEOUT_MS);
+				return () => clearTimeout(timer);
+			}, [loaded, url]);
 
 			useEffect(() => {
 				const node = holder.current;
@@ -565,7 +608,22 @@ window.__ModuleLoader__.load({
 							"div",
 							{ "data-semgp-center": "" },
 							h("div", { "data-semgp-spin": "" }),
-							h("span", null, T("state.loading")),
+							h("span", null, slow ? T("state.loadSlow") : T("state.loading")),
+							slow ? h("p", null, T("state.loadSlowHint")) : null,
+							slow
+								? h(
+										"button",
+										{
+											type: "button",
+											"data-semgp-btn": "",
+											onClick: () => {
+												setSlow(false);
+												if (typeof props.onRetry === "function") props.onRetry();
+											},
+										},
+										T("action.retry"),
+									)
+								: null,
 						),
 				// iframe 不在这里 —— 它在 frameHost 里，这里只是它要覆盖的占位。
 				h("div", { ref: holder, "data-semgp-holder": "" }),
@@ -934,6 +992,18 @@ window.__ModuleLoader__.load({
 			const instruction = (status && status.instruction) || "";
 			const mcpMissing = Boolean(status && status.mcp && status.mcp.configured === false);
 			const noNodes = Boolean(view && stats && stats.nodes === 0);
+
+			// —— 「每轮自动提取」开关 ——
+			//
+			// 和会话标题右边那个按钮**共用同一个 hook**：状态从 host 读，翻的时候互相广播，
+			// 所以从任何一处点开，两处显示的都是同一个状态。
+			const auto = useAutoToggle(
+				sessionId,
+				status && status.auto ? status.auto.on === true : undefined,
+			);
+			const autoOn = auto.on === true;
+			const autoBusy = auto.busy;
+			const flipAuto = auto.flip;
 			const statItems = [
 				["stat.nodes", stats ? stats.nodes : null],
 				["stat.edges", stats ? stats.edges : null],
@@ -966,6 +1036,19 @@ window.__ModuleLoader__.load({
 						statItems.map(([key, value]) => h(Stat, { key, label: T(key), value: value === null ? "—" : value })),
 					),
 					h("span", { "data-semgp-spacer": "" }),
+					h(
+						"button",
+						{
+							type: "button",
+							"data-semgp-btn": "",
+							"data-semgp-auto": autoOn ? "on" : "off",
+							"aria-pressed": autoOn ? "true" : "false",
+							title: autoOn ? T("auto.onHint") : T("auto.offHint"),
+							disabled: !sessionId || autoBusy,
+							onClick: flipAuto,
+						},
+						autoOn ? `● ${T("auto.on")}` : T("auto.off"),
+					),
 					h(Btn, { onClick: () => open(true), disabled: busy }, T("action.refresh")),
 					h(Btn, { onClick: () => setDrawer((v) => !v) }, drawer ? T("analysis.close") : T("action.analysis")),
 					view && view.url ? h(Btn, { href: view.url }, T("action.external")) : null,
@@ -984,7 +1067,6 @@ window.__ModuleLoader__.load({
 								[
 									mode === "conversation" ? Tn("state.taggedOnly", claim.tagged) : null,
 									claim.byEntity ? Tn("state.claimByEntity", claim.byEntity) : null,
-									claim.byTime ? Tn("state.claimByTime", claim.byTime) : null,
 									claim.untagged ? Tn("analysis.untaggedNote", claim.untagged) : null,
 								]
 									.filter(Boolean)
@@ -1007,7 +1089,7 @@ window.__ModuleLoader__.load({
 						// 而下面那段提示（本对话还没节点 + 怎么让模型写 + 切到全部）
 						// 才是有用的。硬把 iframe 顶上来会把提示盖掉。
 						view && view.url && !noNodes
-							? h(ExplorerFrame, { url: view.url, viewKey })
+							? h(ExplorerFrame, { url: view.url, viewKey, onRetry: () => open(true) })
 							: h(
 									"div",
 									{ "data-semgp-center": "" },
@@ -1032,9 +1114,31 @@ window.__ModuleLoader__.load({
 										: null,
 									// 「图里有内容、但本对话一个字都没有」——最容易被误读成「图坏了」，
 									// 所以单独给一条不同的提示，并直接给一条出路。
+									// 「图里有内容、但本对话一个字都没有」—— 最容易被误读成「图坏了」。
+									// 主出路是**开那个开关**（开了下一轮模型自己就会写），次要是「全部」。
 									!busy && !err && noNodes ? h("strong", null, T("state.noNodes")) : null,
 									!busy && !err && noNodes ? h("p", null, T("state.noNodesHint")) : null,
-									!busy && !err && noNodes ? h(Btn, { onClick: () => setMode("all") }, T("mode.all")) : null,
+									!busy && !err && noNodes
+										? h(
+												"div",
+												{ "data-semgp-row": "" },
+												autoOn
+													? h("strong", null, T("auto.turnedOn"))
+													: h(
+															"button",
+															{
+																type: "button",
+																"data-semgp-btn": "",
+																"data-semgp-auto": "off",
+																disabled: autoBusy || !sessionId,
+																onClick: flipAuto,
+															},
+															T("auto.ctaOn"),
+														),
+												h(Btn, { onClick: () => setMode("all") }, T("mode.all")),
+											)
+										: null,
+									!busy && !err && noNodes && !autoOn ? h("p", null, T("auto.ctaHint")) : null,
 									!busy && !err && noNodes && instruction ? h("pre", null, instruction) : null,
 								),
 					),
@@ -1093,6 +1197,105 @@ window.__ModuleLoader__.load({
 				return true;
 			}
 			return false;
+		}
+
+		/** 开关变化时在窗口里广播的事件名（两处入口都在同一个窗口里）。 */
+		const AUTO_EVENT = "semgp-auto";
+
+		/**
+		 * 读/改「每轮自动提取」开关 —— **两处入口共用这一个 hook**。
+		 *
+		 * 为什么要共享而不是各管一份：头部按钮和面板工具栏里那个按钮是**同一个开关**。
+		 * 各存一份本地 state 的话，从头部点开之后面板里还显示「关」，两个地方自相矛盾。
+		 * 所以：状态从 host 读，翻的时候 POST，然后广播一个事件让另一个入口跟着变。
+		 *
+		 * @param sessionId 会话 id（null 时不发请求，按钮表现为不可用）。
+		 * @param fallback 面板已经有 status 时把它带进来，免得等自己的请求回来前先闪一下「关」。
+		 */
+		function useAutoToggle(sessionId, fallback) {
+			const [on, setOn] = useState(typeof fallback === "boolean" ? fallback : null);
+			const [busy, setBusy] = useState(false);
+
+			useEffect(() => {
+				if (!sessionId) return undefined;
+				let alive = true;
+				(async () => {
+					try {
+						const res = await fetch(`/api-semantica/status?sessionId=${encodeURIComponent(sessionId)}`, {
+							headers: { accept: "application/json" },
+						});
+						const data = await readJson(res);
+						// 拿不到就维持「未知」，不装作是关 —— 免得按钮显示的状态是假的
+						if (alive && data && data.ok === true && data.auto) setOn(data.auto.on === true);
+					} catch {
+						// 静默：host 半侧没起来时这个开关本来也用不了
+					}
+				})();
+				const onEvent = (e) => {
+					if (e && e.detail && e.detail.sessionId === sessionId) setOn(e.detail.on === true);
+				};
+				window.addEventListener(AUTO_EVENT, onEvent);
+				return () => {
+					alive = false;
+					window.removeEventListener(AUTO_EVENT, onEvent);
+				};
+			}, [sessionId]);
+
+			const flip = useCallback(async () => {
+				if (busy || on === null || !sessionId) return;
+				const next = on !== true;
+				setBusy(true);
+				setOn(next); // 乐观：按钮立刻反映用户意图，失败再翻回来
+				try {
+					const data = await postJson("/api-semantica/auto", { sessionId, on: next });
+					if (data.ok !== true) setOn(!next);
+					else announceAuto(sessionId, next);
+				} catch {
+					setOn(!next);
+				} finally {
+					setBusy(false);
+				}
+			}, [busy, on, sessionId]);
+
+			return { on, busy, flip };
+		}
+
+		/** 广播开关变化（同一个窗口里的另一个入口据此同步）。 */
+		function announceAuto(sessionId, on) {
+			try {
+				window.dispatchEvent(new CustomEvent(AUTO_EVENT, { detail: { sessionId, on } }));
+			} catch {
+				// 广播不出去只影响另一个入口的即时同步
+			}
+		}
+
+		/**
+		 * 「每轮自动提取」开关。
+		 *
+		 * 它不做提取（那只能由模型调 MCP 工具完成）—— 它改的是**规则**：打开之后，每次
+		 * 组装提示词时 `semantica_directive` 会给模型一段「本轮回复结束前必须写进图谱」的
+		 * 强制要求。所以按钮按下去就生效，不需要重启，也不用再往对话里粘指令。
+		 *
+		 * 会话 id 同样是注册项的 inject 给的（头部槽是 session 作用域）。
+		 */
+		function AutoButton(props) {
+			const sessionId = props.sessionId || "";
+			const { on, busy, flip } = useAutoToggle(sessionId);
+
+			const label = on === true ? T("auto.on") : T("auto.off");
+			return h(
+				"button",
+				{
+					type: "button",
+					"data-semgp-btn": "",
+					"data-semgp-auto": on === true ? "on" : "off",
+					"aria-pressed": on === true ? "true" : "false",
+					title: on === true ? T("auto.onHint") : T("auto.offHint"),
+					disabled: on === null || busy || !sessionId,
+					onClick: flip,
+				},
+				on === true ? `● ${label}` : label,
+			);
 		}
 
 		function GraphButton(props) {
@@ -1192,7 +1395,22 @@ window.__ModuleLoader__.load({
 				),
 			);
 
-			// 2) 头部动作按钮：切到上面那个 tab
+			// 2) 会话标题右侧的「每轮自动提取」开关 —— 每轮要不要写图由它决定
+			ctx.slots.inject("conversation.session.header.actions", () =>
+				ctx.slots.register(
+					{
+						name: "conversation.session.header.actions",
+						id: "semantica-auto",
+						order: 29,
+						locale: NS,
+						// 头部槽同样是 session 作用域：会话 id 走 inject 下发，不是 props
+						inject: (sessionId) => ({ sessionId }),
+					},
+					AutoButton,
+				),
+			);
+
+			// 3) 头部动作按钮：切到上面那个 tab
 			ctx.slots.inject("conversation.session.header.actions", () =>
 				ctx.slots.register(
 					{

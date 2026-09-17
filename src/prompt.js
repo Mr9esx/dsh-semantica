@@ -42,27 +42,70 @@ export const SECTION_ORDER = 700
 export const SESSION_VARIABLE = 'semantica_conversation'
 
 /**
- * 段落正文。`{{semantica_conversation}}` 由上面那个变量插值。
+ * 「写入准则」这个变量。
+ *
+ * 为什么写入准则要是个**变量**而不是写死在段落里：面板上那个「每轮自动提取」开关是
+ * **按会话**的，而且用户随时能改。段落正文是注册一次就固定的，变量则是**每次组装
+ * 提示词时求值** —— 于是开关一翻，下一轮模型看到的规则就变了，不需要重启、也不需要
+ * 重新注册任何东西。
+ *
+ * 关掉时这里给的是轻量规则（值得记的时候顺手记一条），打开时是「每轮必写」。
+ */
+export const DIRECTIVE_VARIABLE = 'semantica_directive'
+
+/**
+ * 段落正文。两个变量由 provider 每次组装时求值。
  *
  * 刻意写得短：这段进的是**每一个**会话的系统提示词，长一句就多一句的开销。
- * 只写模型自己猜不出来的东西 —— 会话标识、metadata 的形状、中文要指定模型、
- * 决策必须带 entities。工具本身怎么用不解释，工具的 description 里都有。
+ * 规则本体放在 DIRECTIVE_VARIABLE 里（因为它要跟着开关变），这里只留固定的壳。
  */
 export const SECTION_TEXT = [
 	'【Semantica 知识图谱（本机 MCP 工具）】',
 	'本会话挂着一张本机知识图谱，工具名以 `mcp__semantica__` 开头，用户可以在「知识图谱」面板里看到它。',
-	'这场对话里产生的、以后还要复用的知识，应该写进这张图，而不是只留在聊天记录里。',
-	`本会话的标识是 \`{{${SESSION_VARIABLE}}}\`。写入时必须带上它：`,
-	`add_entity(id, label, type, metadata={"conversation": "{{${SESSION_VARIABLE}}}"})、`,
-	`add_relationship(source, target, type, metadata={"conversation": "{{${SESSION_VARIABLE}}}"})。`,
-	'抽取用 extract_entities / extract_relations（中文正文要传 model="zh_core_web_sm"，否则中文会被切错），',
-	'再把结果用 add_entity / add_relationship 写进去；id 用可读且稳定的字符串，不要随机串。',
-	'用户在提问工具里确认过的选择，用 record_decision 记录：category 填问题标题、scenario 填背景、',
-	'reasoning 填依据、outcome 填用户选了什么、confidence=1.0、decision_maker="user"，',
-	'并且**必须**把相关节点的 id 放进 entities —— 决策没有 metadata，它靠这些实体边归属到本会话。',
-	'什么时候写：用户明确要求时立刻写；得出可复用的结论、定下方案或约定时顺手写一条。',
-	'琐碎内容不要建节点，写之前可以先用 query_graph 查一下是不是已经有了。',
+	`本会话的标识是 \`{{${SESSION_VARIABLE}}}\`。`,
+	`{{${DIRECTIVE_VARIABLE}}}`,
 ].join('\n')
+
+/**
+ * 两个模式共用的硬约束 —— 都是上游接口决定的，不是偏好：
+ *
+ *   · add_entity / add_relationship 收 metadata，record_decision **不收**，所以决策的
+ *     归属只能靠它 involves 的实体（插件顺着这条边走）；
+ *   · 中文正文必须显式传 model="zh_core_web_sm"，否则 spaCy 的英文模型会把整句当成
+ *     一个实体（实测过），图会废掉。
+ *
+ * @param sessionId 当前会话 id。
+ */
+function rules(sessionId) {
+	return [
+		`写入时必须带上会话标识：add_entity(id, label, type, metadata={"conversation": "${sessionId}"})、`,
+		`add_relationship(source, target, type, metadata={"conversation": "${sessionId}"})。`,
+		'抽取用 extract_entities / extract_relations（中文正文要传 model="zh_core_web_sm"，否则中文会被切错），',
+		'再把结果用 add_entity / add_relationship 写进去；id 用可读且稳定的字符串，不要随机串。',
+		'用户确认过的选择用 record_decision 记录：category 填问题标题、scenario 填背景、reasoning 填依据、',
+		'outcome 填用户选了什么、confidence=1.0、decision_maker="user"，并且**必须**把相关节点 id 放进 entities',
+		'—— 决策没有 metadata，它靠这些实体边归属到本会话。',
+	]
+}
+
+/**
+ * 写入准则正文。这是「每轮自动提取」开关真正作用的地方。
+ *
+ * @param sessionId 当前会话 id。
+ * @param auto 该会话的开关状态。
+ */
+export function directiveFor(sessionId, auto) {
+	return [
+		auto
+			? '【本会话已开启「每轮写入」】**每一轮回复结束前都必须**把这一轮新产生的知识写进图谱 ——' +
+					'至少一条 add_entity 或 record_decision，不要等用户要求，也不要攒到最后一起写。' +
+					'本轮没有新知识时（纯闲聊、纯查询）可以不写，但不要因为「看起来不重要」就跳过。'
+			: '这场对话里产生的、以后还要复用的知识，应该写进这张图，而不是只留在聊天记录里。' +
+					'什么时候写：用户明确要求时立刻写；得出可复用的结论、定下方案或约定时顺手写一条。',
+		...rules(sessionId),
+		'琐碎内容不要建节点，写之前可以先用 query_graph 查一下是不是已经有了。',
+	].join('\n')
+}
 
 /**
  * 渲染好的指令正文（给面板上「复制提取指令」按钮用）。

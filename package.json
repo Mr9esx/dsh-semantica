@@ -39,7 +39,7 @@
     }
   },
   "scripts": {
-    "check": "node --check src/index.js && node --check src/client.js && node --check src/kg.js && node --check src/explorer.js && node --check src/prompt.js && node --check src/session.js",
+    "check": "node --check src/index.js && node --check src/client.js && node --check src/kg.js && node --check src/explorer.js && node --check src/prompt.js && node --check src/toggle.js && node --check src/session.js",
     "selftest": "node scripts/selftest.mjs",
     "visual": "node scripts/visual-check.mjs",
     "install": "node scripts/install.mjs"

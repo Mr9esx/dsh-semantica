@@ -174,14 +174,14 @@ function cleanEdges(edges, byId) {
  * @param graph readGraph() 的结果。
  * @param opts.sessionId 会话 id。
  * @param opts.mode 'conversation' | 'all'。
- * @param opts.window `{ from, to }`（毫秒）：决策的兜底认领窗口，可缺省。
+ * 认领规则只有一条：**明确的会话标**（含由已打标实体通过 involves 边认领的决策）。
+ * 曾经还有一条「时间窗兜底」—— 决策时间落在这个会话的活动时间段里就认领它。那条规则是错的：
+ * 一天里连着聊几个会话时，同一个没打标的决策会被**每一个**时间覆盖它的会话同时认领，
+ * 于是「我根本没提取过的对话」里冒出了别人的 6 个节点。宁可少认，不能认错。
  */
 export function scopeGraph(graph, opts) {
 	const sessionId = String(opts.sessionId ?? '')
 	const mode = opts.mode === 'all' ? 'all' : 'conversation'
-	const from = Number.isFinite(opts.window?.from) ? opts.window.from : null
-	const to = Number.isFinite(opts.window?.to) ? opts.window.to : null
-
 	const live = graph.nodes.filter((n) => n?.properties?.status !== ARCHIVED)
 	const byId = new Map(live.map((n) => [String(n.id), n]))
 
@@ -194,7 +194,6 @@ export function scopeGraph(graph, opts) {
 			claim: {
 				tagged: semantic.filter(hasAnyTag).length,
 				byEntity: 0,
-				byTime: 0,
 				untagged: semantic.filter((n) => !hasAnyTag(n)).length,
 				totalSemantic: semantic.length,
 			},
@@ -208,9 +207,9 @@ export function scopeGraph(graph, opts) {
 	}
 	const taggedNodes = kept.size
 
-	// 2) 决策认领
+	// 2) 决策认领：只认「挂在本会话实体上」的那种（record_decision 没有 metadata，
+	//    entities 边是它唯一的会话归属信号）
 	let byEntity = 0
-	let byTime = 0
 	for (const d of live) {
 		if (String(d.type) !== 'decision') continue
 		const id = String(d.id)
@@ -224,12 +223,6 @@ export function scopeGraph(graph, opts) {
 		if (linked) {
 			kept.add(id)
 			byEntity += 1
-			continue
-		}
-		const t = decisionTime(d)
-		if (t !== null && from !== null && to !== null && t >= from && t <= to) {
-			kept.add(id)
-			byTime += 1
 		}
 	}
 
@@ -271,7 +264,7 @@ export function scopeGraph(graph, opts) {
 		claim: {
 			tagged: taggedNodes,
 			byEntity,
-			byTime,
+			untaggedDecisions: live.filter((n) => String(n.type) === 'decision' && !kept.has(String(n.id))).length,
 			// 没打任何会话标的语义节点 —— 它们只可能出现在「全部」里
 			untagged: live.filter((n) => !DECISION_TYPES.has(String(n.type)) && !hasAnyTag(n)).length,
 			totalSemantic,

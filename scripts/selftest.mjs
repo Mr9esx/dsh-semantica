@@ -21,7 +21,15 @@ import { spawnSync } from 'node:child_process'
 
 import { analyze, readGraph, scopeGraph, summarize, writeGraphFile } from '../src/kg.js'
 import { ExplorerHost, probeExplorer, resolvePython } from '../src/explorer.js'
-import { SECTION_TEXT, SESSION_VARIABLE, instructionFor, SECTION_NAME } from '../src/prompt.js'
+import {
+	DIRECTIVE_VARIABLE,
+	SECTION_NAME,
+	SECTION_TEXT,
+	SESSION_VARIABLE,
+	directiveFor,
+	instructionFor,
+} from '../src/prompt.js'
+import { createToggleStore } from '../src/toggle.js'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SESSION_A = 'session-aaaa-1111'
@@ -108,12 +116,21 @@ const idsA = scopedA.nodes.map((n) => n.id).sort()
 check('本对话视图只留本会话的实体', idsA.includes('vite') && idsA.includes('react') && !idsA.includes('vue'), idsA.join(','))
 check('没打标的实体不进本对话视图', !idsA.includes('loose'))
 check('按实体边认领到 1 条决策', scopedA.claim.byEntity === 1, `byEntity=${scopedA.claim.byEntity}`)
-check('按时间窗口认领到 1 条决策', scopedA.claim.byTime === 1, `byTime=${scopedA.claim.byTime}`)
+check('时间窗兜底认领已经拆掉（不再有时段猜归属这条路）', scopedA.claim.byTime === undefined, `byTime=${scopedA.claim.byTime}`)
 check(
-	'同会话的两条决策都在视图里，远古决策不在',
-	scopedA.nodes.filter((n) => n.type === 'decision').length === 2 &&
-		!scopedA.nodes.some((n) => (n.properties ?? {}).category === '无关决策'),
+	'只有挂在本会话实体上的决策进本对话视图',
+	scopedA.nodes.filter((n) => n.type === 'decision').length === 1 &&
+		!scopedA.nodes.some((n) => (n.properties ?? {}).category === '测试框架'),
 	`decisions=${scopedA.nodes.filter((n) => n.type === 'decision').length}`,
+)
+// 这条是用户当场发现的那个 bug：一个**从没提取过**的会话，打开面板却看到了别人的 6 个节点 ——
+// 就是因为没打标的决策被「时间窗」认领了。现在它只能出现在「全部」里。
+const scopedB2 = scopeGraph(graph, { sessionId: SESSION_B, mode: 'conversation' })
+check(
+	'不带 entities 的决策：A 和 B 都不认领它（宁可不认，不能认错）',
+	!scopedA.nodes.some((n) => (n.properties ?? {}).category === '测试框架') &&
+		!scopedB2.nodes.some((n) => (n.properties ?? {}).category === '测试框架'),
+	`A=${scopedA.nodes.length} 节点 / B=${scopedB2.nodes.length} 节点`,
 )
 check(
 	'未打标只数「压根没打标」的（别的会话写的不算）',
@@ -128,11 +145,16 @@ check(
 
 const scopedAll = scopeGraph(graph, { sessionId: SESSION_A, mode: 'all', window: DECISION_WINDOW })
 check('「全部」模式不切图', scopedAll.nodes.length === graph.nodes.length, `nodes=${scopedAll.nodes.length}`)
+check(
+	'它仍然在「全部」里看得到（不是被藏起来）',
+	scopedAll.nodes.some((n) => (n.properties ?? {}).category === '测试框架'),
+	`全部=${scopedAll.nodes.length} 节点`,
+)
 
 const statsA = summarize(scopedA.nodes, scopedA.edges)
 check(
 	'统计口径：实体/关系不算决策附属',
-	statsA.entities === 3 && statsA.decisions === 2 && statsA.relations >= 2,
+	statsA.entities === 3 && statsA.decisions === 1 && statsA.relations >= 2,
 	JSON.stringify({ e: statsA.entities, d: statsA.decisions, r: statsA.relations }),
 )
 
@@ -141,7 +163,7 @@ check(
 const a = analyze(scopedA.nodes, scopedA.edges)
 check('枢纽榜有内容', a.hubs.byDegree.length > 0 && a.hubs.byRank.length > 0, `top=${a.hubs.byDegree[0]?.label}`)
 check('概览连通分量为 1', a.overview.components === 1, `components=${a.overview.components}`)
-check('决策清单两条、按时间倒序', a.decisions.length === 2 && a.decisions[0].at >= a.decisions[1].at)
+check('决策清单只列本会话的（1 条）', a.decisions.length === 1)
 check(
 	'决策带上了关联实体',
 	a.decisions.some((d) => d.entities.some((e) => e.id === 'vite')),
@@ -265,7 +287,13 @@ apply(hostCtx, {})
 
 check('注册了提示词段（名字/顺序）', sections.length === 1 && sections[0].name === SECTION_NAME && sections[0].order === 700, JSON.stringify(sections.map((s) => [s.name, s.order])))
 check('提示词段正文带会话变量占位', Boolean(sections[0]) && sections[0].text.includes(`{{${SESSION_VARIABLE}}}`))
-check('注册了会话变量', variables.length === 1 && variables[0].name === SESSION_VARIABLE, JSON.stringify(variables.map((v) => v.name)))
+check(
+	'注册了两个变量：会话标识 + 写入准则',
+	variables.length === 2 &&
+		variables.some((v) => v.name === SESSION_VARIABLE) &&
+		variables.some((v) => v.name === DIRECTIVE_VARIABLE),
+	JSON.stringify(variables.map((v) => v.name)),
+)
 check(
 	'会话变量取的是当前会话 id（模型据此打标）',
 	variables[0]?.fn({ agent: { session: { header: { id: SESSION_A } } } }) === SESSION_A,
@@ -359,6 +387,45 @@ async function call(path, { query = '', body } = {}) {
 }
 
 // 图文件还不存在时，三个接口都不该崩
+// —— 「每轮自动提取」开关 ——
+//
+// 它代替的是「把提取指令粘进对话」这个动作：打开之后，每次组装提示词时
+// DIRECTIVE_VARIABLE 会给模型一段「本轮回复结束前必须写进图谱」的强制要求。
+
+const autoOff = await call('/api-semantica/status', { query: `?sessionId=${SESSION_A}` })
+check('status 报出开关状态（默认关）', autoOff.json.auto?.on === false, JSON.stringify(autoOff.json.auto))
+
+const autoOn = await call('/api-semantica/auto', { body: { sessionId: SESSION_A, on: true } })
+check('开关能打开', autoOn.json.ok === true && autoOn.json.on === true, JSON.stringify(autoOn.json))
+
+const autoStatus = await call('/api-semantica/status', { query: `?sessionId=${SESSION_A}` })
+check('打开之后 status 读得到', autoStatus.json.auto?.on === true, JSON.stringify(autoStatus.json.auto))
+
+const autoOther = await call('/api-semantica/status', { query: `?sessionId=${SESSION_B}` })
+check('开关是**按会话**的，别的会话不受影响', autoOther.json.auto?.on === false, JSON.stringify(autoOther.json.auto))
+
+const directiveVariable = variables.find((v) => v.name === DIRECTIVE_VARIABLE)
+const directiveOn = directiveVariable?.fn({ agent: { session: { header: { id: SESSION_A } } } }) ?? ''
+const directiveOff = directiveVariable?.fn({ agent: { session: { header: { id: SESSION_B } } } }) ?? ''
+check('开着时会话拿到的准则是「每轮必写」', directiveOn.includes('每一轮回复结束前都必须'), directiveOn.slice(0, 40))
+check('关着时同一段落给的是轻量准则', directiveOff.includes('顺手写一条') && !directiveOff.includes('每一轮回复结束前都必须'), directiveOff.slice(0, 40))
+check('两种准则都要求带 metadata 和 entities', directiveOn.includes('metadata={"conversation"') && directiveOn.includes('entities'), directiveOn.length + ' 字')
+
+const autoOffAgain = await call('/api-semantica/auto', { body: { sessionId: SESSION_A, on: false } })
+const autoStatus2 = await call('/api-semantica/status', { query: `?sessionId=${SESSION_A}` })
+check('开关能关掉', autoOffAgain.json.on === false && autoStatus2.json.auto?.on === false, JSON.stringify(autoStatus2.json.auto))
+
+const autoNoId = await call('/api-semantica/auto', { body: { on: true } })
+check('缺 sessionId 时开关不写入，并回一个明确错误', autoNoId.json.ok === false && String(autoNoId.json.error).includes('sessionId'), JSON.stringify(autoNoId.json))
+
+// 落盘 + 重启后还在（内存里同步读得到，是因为它在 load() 里读回来）
+const autoFile = join(work, 'dsh-semantica-graph', 'auto-extract.json')
+await call('/api-semantica/auto', { body: { sessionId: SESSION_A, on: true } })
+check('开关落盘了', existsSync(autoFile) && JSON.parse(readFileSync(autoFile, 'utf8'))[SESSION_A]?.on === true, autoFile)
+const reopened = createToggleStore(autoFile)
+check('换一个 store 重新读（等价于重启）状态还在', reopened.isOn(SESSION_A) === true && reopened.isOn(SESSION_B) === false)
+await call('/api-semantica/auto', { body: { sessionId: SESSION_A, on: false } })
+
 const statusNoKg = await call('/api-semantica/status', { query: `?sessionId=${SESSION_A}` })
 check('status 能干跑（还没有图文件时）', statusNoKg.status === 200 && statusNoKg.json.ok === true, JSON.stringify(statusNoKg.json.kg))
 check('status 报出「图文件不存在」', statusNoKg.json.kg.exists === false, String(statusNoKg.json.kg.exists))
@@ -382,7 +449,7 @@ if (viewRes.json.viewPath) {
 }
 
 const anaRes = await call('/api-semantica/analysis', { body: { sessionId: SESSION_A, mode: 'conversation' } })
-check('analysis 返回分析结果', anaRes.json.ok === true && anaRes.json.analysis?.decisions?.length === 2, JSON.stringify({ ok: anaRes.json.ok, d: anaRes.json.analysis?.decisions?.length }))
+check('analysis 返回分析结果', anaRes.json.ok === true && anaRes.json.analysis?.decisions?.length === 1, JSON.stringify({ ok: anaRes.json.ok, d: anaRes.json.analysis?.decisions?.length }))
 check('analysis 里有枢纽与时间线', (anaRes.json.analysis?.hubs?.byDegree?.length ?? 0) > 0 && (anaRes.json.analysis?.timeline?.length ?? 0) > 0)
 
 // 界面诊断：前端回传的真 DOM 几何要落盘（我看不见那个窗口，只能靠这条通道）

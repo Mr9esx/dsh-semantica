@@ -161,6 +161,14 @@ export function probeExplorer({ force = false } = {}) {
 let probeCache = null
 
 /** 要一个空闲端口。交给系统分配，避免自己猜端口撞车。 */
+/** 子进程还活着吗（exitCode 为 null 且不是我们主动 kill 的）。 */
+function isChildAlive(child) {
+	if (!child) return false
+	if (child.exitCode !== null && child.exitCode !== undefined) return false
+	if (child.signalCode !== null && child.signalCode !== undefined) return false
+	return child.killed !== true
+}
+
 function freePort() {
 	return new Promise((resolve, reject) => {
 		const srv = createServer()
@@ -290,13 +298,26 @@ export class ExplorerHost {
 		throw new Error(`Explorer 在 ${READY_TIMEOUT_MS / 1000}s 内没有就绪。${diagnose(log)}`)
 	}
 
-	/** 某个 key 的进程还活着吗（面板用它决定要不要重新拉）。 */
+	/**
+	 * 某个 key 的进程还活着吗。
+	 *
+	 * 不能只看 map 里有没有这条记录：Explorer 可能已经被回收、被别的东西杀掉，或者
+	 * 插件热重载时旧实例没来得及清掉 —— 这时候记录还在，端口上却没人听，面板会一直
+	 * 转圈。所以这里问的是**进程本身**。
+	 */
 	isLive(key) {
-		return this.instances.has(key)
+		const inst = this.instances.get(key)
+		if (!inst) return false
+		if (!isChildAlive(inst.child)) {
+			this.instances.delete(key)
+			return false
+		}
+		return true
 	}
 
-	/** 当前跑着哪些（诊断用）。 */
+	/** 当前跑着哪些（诊断用）。死掉的不算，顺手清出去。 */
 	snapshot() {
+		for (const key of [...this.instances.keys()]) this.isLive(key)
 		return [...this.instances.entries()].map(([key, inst]) => ({
 			key,
 			url: inst.url,
@@ -322,6 +343,11 @@ export class ExplorerHost {
 	#reap() {
 		const now = Date.now()
 		for (const [key, inst] of [...this.instances.entries()]) {
+			// 已经死掉的记录直接清掉（否则它会一直占着 MAX_INSTANCES 的名额）
+			if (!isChildAlive(inst.child)) {
+				this.instances.delete(key)
+				continue
+			}
 			if (now - inst.lastUsed > IDLE_MS) this.#kill(key)
 		}
 	}

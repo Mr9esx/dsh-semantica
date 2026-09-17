@@ -32,7 +32,8 @@ function check(label, ok, detail) {
 // ── 三份假数据：面板要的就是这三个接口 ──
 
 const STATS = { nodes: 42, edges: 51, entities: 30, relations: 38, decisions: 4, byType: [{ type: 'PRODUCT', count: 20 }] }
-const CLAIM = { tagged: 30, byEntity: 2, byTime: 2, untagged: 3, totalSemantic: 33 }
+// byTime 已经不在了：时间窗兜底认领被删掉（它会把别人的决策算进本对话）
+const CLAIM = { tagged: 30, byEntity: 2, untagged: 3, totalSemantic: 33, untaggedDecisions: 2 }
 const KG = { path: '/tmp/harness/dsh-semantica-graph/kg.json', mtime: Date.now(), bytes: 4096 }
 const VIEW_PATH = '/graph-view'
 
@@ -64,7 +65,7 @@ const STATUS = {
 	kg: { path: KG.path, exists: true, mtime: KG.mtime, nodes: 42, edges: 51 },
 	mcp: { configured: true },
 	explorer: { ok: true, version: '0.6.8', python: '/x/python', missing: [], hint: null, running: [] },
-	prompt: { injected: true, section: 'plugin:semantica-graph' },
+	prompt: { injected: true, section: 'plugin:semantica-graph', directive: 'semantica_directive' },
 	instruction: '把这次对话的知识写进 Semantica 知识图谱…',
 }
 
@@ -120,6 +121,16 @@ const VIEW_URL = `${ORIGIN}${VIEW_PATH}`
 let emptyMode = false
 // hostMissing：模拟「改了 host 代码还没重启」—— 路由不存在，Web 服务器回 404 的 HTML。
 let hostMissing = false
+// 「每轮自动提取」开关的假后端：/auto 改它，/status 读它
+let autoOn = false
+// hangMode：/view 给一个「连得上但永远不回应」的地址 —— 用来验「iframe 永远不 load」时
+// 面板会不会一直转圈（用户报的就是这个症状）
+let hangMode = false
+const hangServer = createServer(() => {
+	/* 故意不回应：连接挂着 */
+})
+await new Promise((r) => hangServer.listen(0, '127.0.0.1', r))
+const HANG_URL = `http://127.0.0.1:${hangServer.address().port}/`
 const requestLog = []
 // 面板挂载后会回传一份真 DOM 几何（诊断用），这里收下来顺便当断言素材
 const diagBodies = []
@@ -134,8 +145,15 @@ await page.route('**/api-semantica/**', async (route, request) => {
 		diagBodies.push(body)
 		return route.fulfill({ json: { ok: true, file: '/tmp/harness/last-diag.json' } })
 	}
-	if (url.includes('/status')) return route.fulfill({ json: STATUS })
+	if (url.includes('/status')) return route.fulfill({ json: { ...STATUS, auto: { on: autoOn } } })
+	if (url.includes('/auto')) {
+		autoOn = body.on === true
+		return route.fulfill({ json: { ok: true, on: autoOn } })
+	}
 	if (url.includes('/view')) {
+		if (hangMode) {
+			return route.fulfill({ json: { ok: true, url: HANG_URL, mode: body.mode, key: `${body.mode}:${body.sessionId}`, stats: STATS, claim: CLAIM, kg: KG, ms: 9 } })
+		}
 		if (emptyMode) {
 			return route.fulfill({
 				json: {
@@ -144,7 +162,7 @@ await page.route('**/api-semantica/**', async (route, request) => {
 					mode: body.mode,
 					key: `${body.mode}:${body.sessionId}`,
 					stats: { ...STATS, nodes: 0, edges: 0, entities: 0, relations: 0, decisions: 0 },
-					claim: { tagged: 0, byEntity: 0, byTime: 0, untagged: 3, totalSemantic: 33 },
+					claim: { tagged: 0, byEntity: 0, untagged: 3, totalSemantic: 33, untaggedDecisions: 2 },
 					kg: KG,
 					ms: 12,
 				},
@@ -198,23 +216,32 @@ window.__mount = (sessionId) => {
     slots: {
       inject(name, fn) { fn(); },
       register(meta, component) {
-        registered[meta.name] = component;
-        specs[meta.name] = meta;
+        // 一个槽可以注册多个：头部现在是「每轮提取开关」+「打开面板」两个按钮
+        (registered[meta.name] ||= []).push(component);
+        (specs[meta.name] ||= []).push(meta);
       },
     },
   };
   window.__plugin.apply(ctx);
-  window.__view = registered['conversation.view'];
-  window.__header = registered['conversation.session.header.actions'];
+  window.__view = registered['conversation.view'][0];
+  window.__headers = registered['conversation.session.header.actions'];
+  window.__header = window.__headers[window.__headers.length - 1]; // 最后一个 = 打开面板那个
   window.__specs = specs;
+  window.__specsOf = (name) => specs[name] || [];
   // 照核心的真实契约组 props：conversation.view 的注册项 inject 会收到会话 id
   // （dsh-client-ui-renderer 的 runInject(entry, binding, actions) → binding.key），
   // 核心自己只额外传 viewRequest / openView / completeViewRequest。
   // **核心不传 sessionId** —— 这里也不传，否则测不出「忘了 inject」这类错。
-  const meta = specs['conversation.view'] || {};
+  const meta = (specs['conversation.view'] || [])[0] || {};
   const injected = typeof meta.inject === 'function' ? meta.inject(sessionId) : {};
   const coreProps = { viewRequest: null, openView: () => {}, completeViewRequest: () => {} };
-  window.__root = ReactDOM.createRoot(document.getElementById('root'));
+  // 每次都换一个**新的容器**挂：对着同一个 container 反复 createRoot 会报
+  // 「container has already been passed to createRoot()」，那噪音会污染「本轮不该有别的报错」。
+  const host = document.getElementById('root');
+  host.innerHTML = '';
+  const el = document.createElement('div');
+  host.appendChild(el);
+  window.__root = ReactDOM.createRoot(el);
   window.__root.render(React.createElement(window.__view, Object.assign({}, coreProps, injected)));
   return Boolean(window.__view);
 };
@@ -225,6 +252,14 @@ window.__mount = (sessionId) => {
 // 等于把「祖先一定有高度」这个假设抄进了测试，真界面里恰恰不是这样。核心的类是
 // Sbj43W_viewArea{flex:1 0 auto;min-height:auto}，而 fake 模式再给它套一层没有确定
 // 高度的祖先，就能复现「画布塌成 0、图看不见」。
+window.__resetTree = () => {
+  try { window.__root?.unmount(); } catch {}
+  try { window.__headerRoot?.unmount(); } catch {}
+  const host = document.getElementById('root');
+  if (host) host.innerHTML = '';
+  document.querySelectorAll('[data-semgp-frame-host]').forEach((n) => n.remove());
+};
+
 window.__mountReal = (sessionId, options) => {
   const opts = options || {};
   document.getElementById('root').innerHTML = '';
@@ -274,17 +309,34 @@ window.__mountReal = (sessionId, options) => {
   document.getElementById('root').appendChild(rootEl);
 
   const specs = window.__specs || {};
-  const meta = specs['conversation.view'] || {};
+  const meta = (specs['conversation.view'] || [])[0] || {};
   const injected = typeof meta.inject === 'function' ? meta.inject(sessionId) : {};
   const coreProps = { viewRequest: null, openView: () => {}, completeViewRequest: () => {} };
   window.__chain = { rootEl, scrollBody, seat, viewArea, viewOutlet, tabStrip };
   window.__root = ReactDOM.createRoot(viewOutlet);
   window.__root.render(React.createElement(window.__view, Object.assign({}, coreProps, injected)));
-  // 头部入口按钮也照真实契渲染（它的 openPanel 是注册项 inject 给的）
-  const headerMeta = specs['conversation.session.header.actions'] || {};
-  const headerProps = typeof headerMeta.inject === 'function' ? headerMeta.inject(sessionId) : {};
+  // 头部按钮也照真实契约渲染：每个注册项各自拿到自己的 inject 结果
+  // （openPanel 走 inject，开关按钮的 sessionId 也走 inject）
   window.__headerRoot = ReactDOM.createRoot(headerBtnHost);
-  window.__headerRoot.render(React.createElement(window.__header, headerProps));
+  window.__headerRoot.render(
+    React.createElement(
+      React.Fragment,
+      null,
+      window.__headers.map((Comp, i) => {
+        const hMeta = (specs['conversation.session.header.actions'] || [])[i] || {};
+        const hProps = typeof hMeta.inject === 'function' ? hMeta.inject(sessionId) : {};
+        return React.createElement(Comp, Object.assign({ key: i }, hProps));
+      }),
+    ),
+  );
+  return true;
+};
+
+// 按文字找按钮并点（开关按钮的文字会随状态变）
+window.__clickText = (text) => {
+  const btn = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').trim().includes(text));
+  if (!btn) return false;
+  btn.click();
   return true;
 };
 
@@ -304,11 +356,18 @@ const applied = await page.evaluate(() => window.__mount('session-visual-1'))
 check('插件 apply() 注册出了 conversation.view', applied === true)
 
 const viewMeta = await page.evaluate(() => {
-  const m = (window.__specs || {})['conversation.view'] || {}
+  const m = ((window.__specs || {})['conversation.view'] || [])[0] || {}
   return { id: m.id, order: m.order, label: typeof m.label === 'function' ? m.label() : m.label, hasInject: typeof m.inject === 'function' }
 })
 check('视图注册项 id/顺序/文案对', viewMeta.id === 'semantica-graph' && viewMeta.order === 30 && viewMeta.label === '知识图谱', JSON.stringify(viewMeta))
 check('视图注册项声明了 inject（核心不会把 sessionId 传成 props）', viewMeta.hasInject === true)
+
+const headerMeta = await page.evaluate(() => ((window.__specsOf || (() => []))('conversation.session.header.actions') || []).map((m) => ({ id: m.id, inject: typeof m.inject === 'function' })))
+check(
+	'头部注册了两个按钮：每轮提取开关 + 打开面板',
+	headerMeta.length === 2 && headerMeta.every((m) => m.inject === true) && headerMeta.some((m) => m.id === 'semantica-auto'),
+	JSON.stringify(headerMeta),
+)
 check('头部按钮也注册了', await page.evaluate(() => Boolean(window.__header)))
 
 await page.waitForTimeout(400)
@@ -482,6 +541,50 @@ await page.waitForTimeout(200)
 const decisionsText = await page.textContent('[data-semgp-drawer] [data-semgp-pane]')
 check('决策页签显示了决策内容与关联实体', decisionsText.includes('构建工具') && decisionsText.includes('Vite'), decisionsText.replace(/\s+/g, ' ').slice(0, 80))
 
+// ── 「每轮自动提取」开关 ──
+//
+// 用户要的是「对话里有个按钮，开了之后每轮都调 MCP」，所以这里验三件事：
+//   1. 对话头部（和面板工具栏）各有一个开关，且默认是「关」；
+//   2. 点一下真的把状态写进 host（POST /auto），按钮变「开」；
+//   3. 面板自己读到的状态也跟着变（两处入口是同一个开关）。
+
+await page.evaluate(() => window.__resetTree())
+await page.evaluate(() => window.__mountReal('session-visual-1'))
+await page.waitForTimeout(900)
+
+const autoBefore = await page.evaluate(() => ({
+	header: [...document.querySelectorAll('[data-semgp-auto]')].map((b) => ({
+		where: b.closest('[data-semgp-bar]') ? 'panel' : 'header',
+		state: b.getAttribute('data-semgp-auto'),
+		pressed: b.getAttribute('aria-pressed'),
+		text: (b.textContent || '').trim(),
+	})),
+}))
+check(
+	'头部与面板里各有一个开关，默认都是「关」',
+	autoBefore.header.length === 2 && autoBefore.header.every((b) => b.state === 'off' && b.pressed === 'false'),
+	JSON.stringify(autoBefore.header),
+)
+
+const autoClicked = await page.evaluate(() => window.__clickText('每轮提取：关'))
+await page.waitForTimeout(250)
+const autoAfter = await page.evaluate(() => ({
+	states: [...document.querySelectorAll('[data-semgp-auto]')].map((b) => b.getAttribute('data-semgp-auto')),
+	texts: [...document.querySelectorAll('[data-semgp-auto]')].map((b) => (b.textContent || '').trim()),
+}))
+const autoPosts = requestLog.filter((r) => r.includes('/auto'))
+check('点头部开关会打开它（按钮变「开」）', autoClicked === true && autoAfter.states.every((v) => v === 'on'), JSON.stringify(autoAfter))
+check(
+	'开这一下真的写进了 host（POST /auto）',
+	autoPosts.length === 1 && autoPosts[0].startsWith('POST /auto'),
+	JSON.stringify(autoPosts),
+)
+check('面板里那个开关跟着一起变成「开」（同一个开关）', autoAfter.texts.filter((t) => t.includes('开')).length === 2, JSON.stringify(autoAfter.texts))
+
+// 关回去，别影响后面的用例
+await page.evaluate(() => window.__clickText('每轮提取：开'))
+await page.waitForTimeout(250)
+
 // ── 空态：「图里有内容、本对话一个字都没有」 ──
 
 emptyMode = true
@@ -504,6 +607,34 @@ const emptyText = await page.textContent('[data-semgp-center]')
 check('空态给的是「本对话还没节点」，不是「图坏了」', emptyText.includes('本对话在图里还没有节点'), emptyText.replace(/\s+/g, ' ').slice(0, 80))
 check('空态给出可复制的提取指令', emptyText.includes('Semantica 知识图谱'), emptyText.replace(/\s+/g, ' ').slice(0, 60))
 check('空图时不渲染 Explorer（空画布不如一句解释）', emptyDebug.hasFrame === false, `frameHost=${emptyDebug.hasFrame}`)
+check(
+	'空态的主出路是「开开关」，而且文案是翻译过的（不是 auto.ctaOn 这种键名）',
+	(emptyDebug.canvasText || '').includes('开启每轮自动提取') && !(emptyDebug.canvasText || '').includes('auto.'),
+	(emptyDebug.canvasText || '').slice(0, 60),
+)
+emptyMode = false // 切回「有内容」，后面的阶段不该继承空态
+
+// ── Explorer 连得上但永远不回应 ──
+//
+// 用户报的「点开知识图谱，一直提示打开中」就是这个形状：iframe 指向的端口不会回任何
+// 东西，load 事件永远不来。以前没有上限，遮罩就永远挂在那儿；现在 15 秒后必须换成
+// 一句人话加一个「重试」。
+
+hangMode = true
+await page.evaluate(() => window.__resetTree())
+await page.evaluate(() => window.__mount('session-visual-hang'))
+await page.evaluate(() => window.__mountReal('session-visual-hang'))
+await page.waitForTimeout(900)
+const hangEarly = await page.textContent('[data-semgp-center]')
+check('挂住时先是「正在打开图…」', hangEarly.includes('正在打开图'), hangEarly.replace(/\s+/g, ' ').slice(0, 40))
+
+await page.waitForTimeout(16000) // 越过 LOAD_TIMEOUT_MS（15s）
+const hangLate = await page.evaluate(() => ({
+	text: document.querySelector('[data-semgp-center]')?.textContent?.replace(/\s+/g, ' ') ?? null,
+	hasRetry: [...document.querySelectorAll('[data-semgp-center] button')].some((b) => (b.textContent || '').includes('重试')),
+}))
+check('超时后不再转圈，而是说明 + 重试', Boolean(hangLate.text?.includes('图没打开')) && hangLate.hasRetry === true, JSON.stringify(hangLate))
+hangMode = false
 
 // ── host 半侧没加载时（改了 host 代码还没重启 DSH）要说人话 ──
 //
