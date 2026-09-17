@@ -11,27 +11,32 @@
 // 读取路径优先走 host 服务 ctx.sessionPersistence（list + locate 拿绝对产物路径），
 // 服务缺席时回退到直接扫描 $DSH_HOME/sessions。
 //
-// ── 为什么不用 sessionPersistence 的 load() / inspect()（实测结论，别再试一遍）──
+// ── 为什么读取路径只有「读文件」这一条 ──
 //
-// 这里原来是另一条理由（「load 会在回合开放时拒绝」）。那条**不准确**，查源码对不上：
-// inspect() 对活跃会话是 `inspectLive(live)` 直接返回内存视图，没有任何「开放回合就
-// 拒绝」的判定；它的 closers 补的是 `interruptedTurnClosers()` —— 崩溃留下的**被中断**
-// 回合，不是正在进行的回合。真正该避开的是 load()：它会 commitPrepared，
-// 在有 torn tail 时**截断并改写会话文件**。
+// 先说 id 形态，这是最容易搞错的地方（我在这里栽过一次）：
+// 持久化层认的会话 id **就是磁盘上的目录名**，顶层会话是 `session-<uuid>`，
+// 多数子会话（origin=subagent）是裸 `<uuid>`。实测依据：48 个子会话目录全是裸 uuid
+// 且 header 里 origin 均为 subagent，而 header 的 parentSession 写的是
+// `session-<父 uuid>`（带前缀）。
+// 但插件从 DSH 客户端拿到的是**裸 uuid** —— 所以 resolveSessionFile 必须两种都试。
 //
-// 但 inspect() 仍然不能用，原因是**磁盘布局**：
-//   · 后端用 `join(projectDir, encodeSegment(id))` 拼路径，encodeSegment 是逐字符
-//     转义、对 UUID 原样返回 —— 也就是当前布局是 `<cwd>/<uuid>/session.jsonl.zstd`。
-//   · 实测：新布局的会话 inspect() 能找到；而 `session-<uuid>/` 这种**旧布局**一律
-//     抛 SessionPersistenceNotFoundError（用离线脚本对磁盘上 61 个旧布局会话全试过，
-//     0 成功；对 48 个新布局会话全部走到后续步骤）。
-//   · 正在画图的那个会话恰恰是旧布局 —— 它是 app 更新之前创建的，DSH 之后一直往
-//     老目录里追加。所以 inspect() 看不见的正是我们最常画的那种会话。
+// load() 不能用：它会 commitPrepared，在有 torn tail 时**截断并改写会话文件**。
 //
-// 而直接读文件对两种布局都能工作（同一实测里 4/4 成功：旧布局 1 个 + 新布局 3 个），
-// 因为回退扫描是按 sessionId 找目录名，两种命名都认。
-// 所以读取路径就一条：locate() 拿路径 → 读文件。别再加 inspect() 做「优先/回退」，
-// 那会把一条可靠的路径变成两条都要维护的路径。
+// 这里曾经写着「load()/inspect() 对仍绑定活动回合的会拒绝」。那条**查源码对不上**：
+// inspect() 对活跃会话走 `inspectLive(live)` 直接返回内存视图，没有「开放回合就拒绝」
+// 的判定；它的 closers 来自 `interruptedTurnClosers()`，补的是崩溃留下的**被中断**
+// 回合，不是正在进行的回合。
+//
+// inspect() / readFrom() 是 DSH 自己给「轨迹」供数用的宿主接口（客户端
+// ctx.uiConversation → ctx.sessions.binding(id).eventSource，窗口化 + hasMore 分页），
+// 语义上完全够我们用。但换成它们要额外解决一件事：必须传**目录名形态**的 id，
+// 而不是客户端给的裸 uuid。我没有验证成功过 —— 两次离线尝试都不成立（第一次传了
+// 裸 uuid，第二次 stub 的 sessions registry 让 inspect 的 for(;;) 重试空转），
+// 所以**「inspect 能不能用」目前是未验证状态**，不要引用任何一方的结论。
+//
+// 当前选择就一条路：locate() 拿路径 → 读文件。它对两种 id 形态、两种目录命名都工作
+// （实测 4/4），而「优先 inspect、失败回退文件」会把一条可靠的路径变成两条都要维护的
+// 路径。要真换，先离线把目录名形态的 id 验证通，再整条替换。
 
 import { zstdDecompressSync } from 'node:zlib'
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
