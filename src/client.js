@@ -88,7 +88,9 @@ window.__ModuleLoader__.load({
 			"state.noKgHint": "图由模型通过 mcp__semantica__ 工具写入。把下面这段指令粘进对话，让它把这次对话抽进去：",
 			"state.noNodes": "本对话在图里还没有节点",
 			"state.noNodesHint":
-				"图里有别的会话写入的内容。开下面这个开关，模型从下一轮开始就会自己写进来；也可以点「复制提取指令」当场补一次，或者切到「全部」看整张图。",
+				"这个对话还一个字都没写进去（图里那些是**别的**会话写的，切到「全部」才看得到）。"
+					+ "想立刻补上就两步：① 点下面的「复制提取指令」；② 粘到输入框发出去 —— 模型当场就会把这次对话抽进图。"
+					+ "想让它以后每一轮都自己写，把「每轮提取」打开。",
 			"state.taggedOnly": "本对话 {n} 个节点",
 			"state.byEdge": "其中 {n} 个是我这次写过的边连到的",
 			"state.claimByEntity": "按实体边认领 {n} 条决策",
@@ -159,7 +161,10 @@ window.__ModuleLoader__.load({
 				"The graph is written by the model through the mcp__semantica__ tools. Paste this prompt into the chat:",
 			"state.noNodes": "This chat has no nodes in the graph yet",
 			"state.noNodesHint":
-				"The graph holds other chats' content. Turn on the switch below and the model writes from the next turn on; you can also copy the prompt to backfill now, or switch to “All”.",
+				"This chat has not written a single node yet (what is in the graph belongs to **other** chats; "
+					+ "switch to “All” to see those). To backfill right now, two steps: ① hit “Copy extract prompt” below; "
+					+ "② paste it into the composer and send — the model extracts this chat on the spot. "
+					+ "To have it write every turn from now on, turn on “extract per turn”.",
 			"state.taggedOnly": "{n} nodes in this chat",
 			"state.byEdge": "{n} of them linked by an edge I wrote",
 			"state.claimByEntity": "{n} decisions claimed by entity edges",
@@ -1243,6 +1248,17 @@ window.__ModuleLoader__.load({
 										? h(
 												"div",
 												{ "data-semgp-row": "" },
+												h(
+													"button",
+													{
+														type: "button",
+														"data-semgp-btn": "",
+														"data-semgp-empty-copy": "",
+														disabled: !instruction,
+														onClick: copy,
+													},
+													copied ? T("action.copied") : T("action.copy"),
+												),
 												autoOn
 													? h("strong", null, T("auto.turnedOn"))
 													: h(

@@ -988,7 +988,9 @@ await page.evaluate(() => window.__mount('session-visual-empty'))
 await page.waitForTimeout(1200)
 const emptyDebug = await page.evaluate(() => ({
 	centerText: document.querySelector('[data-semgp-center]')?.textContent?.slice(0, 60) ?? null,
-	canvasText: document.querySelector('[data-semgp-canvas]')?.textContent?.replace(/\s+/g, ' ').slice(0, 120) ?? null,
+	// 120 字不够了：空态文案加上「两步补数据」之后，后面的「开开关」按钮文字会被截掉，
+	// 断言就会假失败（踩过一次）
+	canvasText: document.querySelector('[data-semgp-canvas]')?.textContent?.replace(/\s+/g, ' ').slice(0, 400) ?? null,
 	stats: document.querySelector('[data-semgp-stats]')?.textContent?.replace(/\s+/g, ' ') ?? null,
 	info: document.querySelector('[data-semgp-info]')?.textContent?.replace(/\s+/g, ' ') ?? null,
 	hasFrame: Boolean(document.querySelector('[data-semgp-frame-host]')),
@@ -1000,7 +1002,20 @@ check('空态给的是「本对话还没节点」，不是「图坏了」', empt
 check('空态给出可复制的提取指令', emptyText.includes('Semantica 知识图谱'), emptyText.replace(/\s+/g, ' ').slice(0, 60))
 check('空图时不渲染 Explorer（空画布不如一句解释）', emptyDebug.hasFrame === false, `frameHost=${emptyDebug.hasFrame}`)
 check(
-	'空态的主出路是「开开关」，而且文案是翻译过的（不是 auto.ctaOn 这种键名）',
+	'空态里就有「复制提取指令」这个按钮（第一步，不用去工具栏找）',
+	(await page.$('[data-semgp-empty-copy]')) !== null,
+	JSON.stringify(await page.$$eval('[data-semgp-empty-copy]', (els) => els.map((e) => e.textContent))),
+)
+check(
+	'空态把补数据的步骤写成两步（① 复制 ② 粘进输入框发出去），并且说清图里那些是别的会话写的',
+	(emptyDebug.canvasText || '').includes('这个对话还一个字都没写进去') &&
+		(emptyDebug.canvasText || '').includes('①') &&
+		(emptyDebug.canvasText || '').includes('②') &&
+		(emptyDebug.canvasText || '').includes('别的'),
+	(emptyDebug.canvasText || '').slice(0, 90),
+)
+check(
+	'空态的另一条出路是「开开关」，而且文案是翻译过的（不是 auto.ctaOn 这种键名）',
 	(emptyDebug.canvasText || '').includes('开启每轮自动提取') && !(emptyDebug.canvasText || '').includes('auto.'),
 	(emptyDebug.canvasText || '').slice(0, 60),
 )

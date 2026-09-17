@@ -436,7 +436,13 @@ async function call(path, { query = '', body } = {}) {
 // DIRECTIVE_VARIABLE 会给模型一段「本轮回复结束前必须写进图谱」的强制要求。
 
 const autoOff = await call('/api-semantica/status', { query: `?sessionId=${SESSION_A}` })
-check('status 报出开关状态（默认关）', autoOff.json.auto?.on === false, JSON.stringify(autoOff.json.auto))
+// 用户明确要求：新对话默认**开**。理由是他报的那句「打开知识图谱，里面跟我这个对话
+// 完全没关系」—— 查下来那个对话一个字都没写进去，而默认关意味着「打开面板什么都看不到」。
+check(
+	'新装（还没有配置文件）时默认就是「开」',
+	autoOff.json.auto?.on === true && autoOff.json.auto?.default === true,
+	JSON.stringify(autoOff.json.auto),
+)
 check(
 	'status 报出切图规则版本（前端拿它当视图键的一部分）',
 	autoOff.json.scope?.version === SCOPE_VERSION,
@@ -449,11 +455,19 @@ check('开关能打开', autoOn.json.ok === true && autoOn.json.on === true, JSO
 const autoStatus = await call('/api-semantica/status', { query: `?sessionId=${SESSION_A}` })
 check('打开之后 status 读得到', autoStatus.json.auto?.on === true, JSON.stringify(autoStatus.json.auto))
 
+// 把默认显式关掉，再看别的会话 —— 这一步同时验证「默认能被关」和「开关是按会话的」
+const defOff = await call('/api-semantica/auto', { body: { default: false } })
+check('能把新会话默认值显式关掉', defOff.json.ok === true && defOff.json.default === false, JSON.stringify(defOff.json))
 const autoOther = await call('/api-semantica/status', { query: `?sessionId=${SESSION_B}` })
-check('开关是**按会话**的，别的会话不受影响', autoOther.json.auto?.on === false, JSON.stringify(autoOther.json.auto))
+check(
+	'开关是**按会话**的：显式关掉默认后，没单独设过的会话跟着默认（关）',
+	autoOther.json.auto?.on === false && autoOther.json.auto?.default === false,
+	JSON.stringify(autoOther.json.auto),
+)
 
 const directiveVariable = variables.find((v) => v.name === DIRECTIVE_VARIABLE)
 const directiveOn = directiveVariable?.fn({ agent: { session: { header: { id: SESSION_A } } } }) ?? ''
+// 此刻 SESSION_A 是显式打开、SESSION_B 跟着「关」的默认值 —— 正好一个强制、一个轻量
 const directiveOff = directiveVariable?.fn({ agent: { session: { header: { id: SESSION_B } } } }) ?? ''
 check('开着时会话拿到的准则是「每轮必写」', directiveOn.includes('每一轮回复结束前都必须'), directiveOn.slice(0, 40))
 check('关着时同一段落给的是轻量准则', directiveOff.includes('顺手写一条') && !directiveOff.includes('每一轮回复结束前都必须'), directiveOff.slice(0, 40))
@@ -469,12 +483,43 @@ check('缺 sessionId 时开关不写入，并回一个明确错误', autoNoId.js
 // 落盘 + 重启后还在（内存里同步读得到，是因为它在 load() 里读回来）
 const autoFile = join(work, 'dsh-semantica-graph', 'auto-extract.json')
 await call('/api-semantica/auto', { body: { sessionId: SESSION_A, on: true } })
-check(
-	'开关落盘了（新格式：default + sessions）',
-	existsSync(autoFile) &&
-		JSON.parse(readFileSync(autoFile, 'utf8')).sessions?.[SESSION_A]?.on === true,
-	autoFile,
-)
+{
+	const onDisk = existsSync(autoFile) ? JSON.parse(readFileSync(autoFile, 'utf8')) : null
+	check(
+		'开关落盘了（格式带版本号 v + default + sessions）',
+		onDisk?.v === 1 && onDisk?.sessions?.[SESSION_A]?.on === true,
+		JSON.stringify({ v: onDisk?.v, sessions: Object.keys(onDisk?.sessions ?? {}) }),
+	)
+}
+
+// —— 旧格式文件的升级 ——
+//
+// 老版本写的文件里没有 v 字段，那个 `default: false` 是**旧代码的默认值**，不是用户的选择。
+// 新策略（默认开）必须能把它升上来，否则用户改了代码却看不到任何变化 —— 他的机器上就是
+// 这种情况：文件里写着 default: false，从没被谁点过。
+{
+	const legacyFile = join(work, 'legacy-auto.json')
+	writeFileSync(
+		legacyFile,
+		JSON.stringify({ default: false, sessions: { [SESSION_A]: { on: true, updatedAt: '2026-01-01T00:00:00.000Z' } } }),
+	)
+	const legacy = createToggleStore(legacyFile)
+	const LEGACY_NEW = 'session-legacy-untouched'
+	check(
+		'旧格式文件（没有 v）按新默认升级：没设过的新会话是「开」',
+		legacy.getDefault() === true && legacy.isOn(LEGACY_NEW) === true,
+		JSON.stringify({ def: legacy.getDefault(), on: legacy.isOn(LEGACY_NEW) }),
+	)
+	check('旧文件里单独设过的会话照旧保留', legacy.isOn(SESSION_A) === true, String(legacy.isOn(SESSION_A)))
+	// 再显式关一次默认 —— 这次带 v 了，必须被当真（不能又升回开）
+	legacy.setDefault(false)
+	const legacy2 = createToggleStore(legacyFile)
+	check(
+		'显式关掉的默认值不会再被升级覆盖（v 字段生效）',
+		JSON.parse(readFileSync(legacyFile, 'utf8')).v === 1 && legacy2.getDefault() === false,
+		JSON.stringify({ def: legacy2.getDefault() }),
+	)
+}
 const reopened = createToggleStore(autoFile)
 check('换一个 store 重新读（等价于重启）状态还在', reopened.isOn(SESSION_A) === true && reopened.isOn(SESSION_B) === false)
 
@@ -484,8 +529,12 @@ check('换一个 store 重新读（等价于重启）状态还在', reopened.isO
 // 第一条消息之前**根本没有会话**，核心那排标签/标题是会话级槽，那时整排都不渲染，
 // 任何「按会话」的开关都够不着。所以「以后每条新对话都自动提取」只能靠默认值提前设好。
 const SESSION_NEW = 'session-brand-new-9999'
-const defOff = await call('/api-semantica/status', { query: `?sessionId=${SESSION_NEW}` })
-check('没有单独设过的新会话跟着默认值（默认关）', defOff.json.auto?.on === false && defOff.json.auto?.default === false, JSON.stringify(defOff.json.auto))
+const defFollower = await call('/api-semantica/status', { query: `?sessionId=${SESSION_NEW}` })
+check(
+	'没有单独设过的新会话跟着默认值（此刻默认被显式关成 false）',
+	defFollower.json.auto?.on === false && defFollower.json.auto?.default === false,
+	JSON.stringify(defFollower.json.auto),
+)
 
 const defSet = await call('/api-semantica/auto', { body: { default: true } })
 check('能把新会话默认值设成「开」', defSet.json.ok === true && defSet.json.default === true, JSON.stringify(defSet.json))

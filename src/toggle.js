@@ -31,13 +31,34 @@ import { dirname } from 'node:path'
 const MAX_ENTRIES = 400
 
 /**
+ * 落到磁盘上的格式版本。存在两个理由：
+ *
+ *   · 第一版没有这个字段（那时候的默认值是**关**）；
+ *   · 加字段时得能区分「用户自己设成关」和「旧版本的默认值恰好是关」。
+ *
+ * 用户报过的问题：「打开知识图谱，里面跟我这个对话完全没关系」—— 查下来是那个对话
+ * **一个字都没写进去**（模型没写），而新对话默认又是关的。默认关的代价是「打开面板
+ * 什么都看不到」，默认开的代价是「每轮都可能写入、更费 token」。用户选了后者，
+ * 所以新装的默认值改成开，并且把旧文件（没有 v 字段的）也升上来。
+ *
+ * 诚实的代价：如果有人在旧版本里**特意**把默认改成关，这次升级会把它改回开。旧格式
+ * 里没记「这是不是用户显式设的」，无从区分；代价是一下点击（工具栏那个开关就能改回去）。
+ */
+const FORMAT_VERSION = 1
+
+/** 没设过任何东西时的默认值（= 新装默认）。 */
+const DEFAULT_ON = true
+
+/**
  * 建一个开关存储。
  *
  * @param file 落盘位置（flat JSON）。
  */
 export function createToggleStore(file) {
 	/** @type {boolean} 新会话的默认值 */
-	let def = false
+	let def = DEFAULT_ON
+	/** 磁盘上的格式版本（0 = 第一版，没有这个字段） */
+	let fmt = 0
 	/** @type {Map<string, { on: boolean, updatedAt: string }>} */
 	const sessions = new Map()
 	let loaded = false
@@ -49,11 +70,15 @@ export function createToggleStore(file) {
 		try {
 			raw = JSON.parse(readFileSync(file, 'utf8'))
 		} catch {
-			// 文件不存在 / 坏了都当「全关」—— 开关读不出来时最安全的默认是别自动写图
+			// 文件不存在（新装）→ 保持 DEFAULT_ON。坏了也一样：读不出来就当默认值，
+			// 用户随时能在界面上改。
 			return
 		}
 		if (!raw || typeof raw !== 'object') return
-		if (raw.default === true) def = true
+		fmt = Number(raw.v) || 0
+		// 旧格式文件里那个 default 是**旧版本的默认值**写下来的，不是用户的选择
+		// （用户设过就带 v 字段了）。所以旧文件一律采用新默认，然后按新格式落一次盘。
+		def = fmt >= FORMAT_VERSION ? raw.default === true : DEFAULT_ON
 		const bag = raw.sessions && typeof raw.sessions === 'object' ? raw.sessions : null
 		if (bag) {
 			for (const [id, v] of Object.entries(bag)) {
@@ -79,7 +104,11 @@ export function createToggleStore(file) {
 				for (const [id] of sorted.slice(0, sessions.size - MAX_ENTRIES)) sessions.delete(id)
 			}
 			mkdirSync(dirname(file), { recursive: true })
-			writeFileSync(file, JSON.stringify({ default: def, sessions: Object.fromEntries(sessions) }, null, 1))
+			writeFileSync(
+				file,
+				JSON.stringify({ v: FORMAT_VERSION, default: def, sessions: Object.fromEntries(sessions) }, null, 1),
+			)
+			fmt = FORMAT_VERSION
 		} catch {
 			// 写不进去只影响下次重启后的状态，不影响这一轮的行为
 		}
@@ -117,6 +146,7 @@ export function createToggleStore(file) {
 		},
 
 		/** 改新会话的默认值（不影响已经单独设过的会话），落盘。 */
+		/** 改新会话的默认值（不影响已经单独设过的会话），落盘。 */
 		setDefault(on) {
 			load()
 			def = on === true
@@ -127,7 +157,7 @@ export function createToggleStore(file) {
 		/** 诊断用。 */
 		snapshot() {
 			load()
-			return { file, default: def, sessions: Object.fromEntries(sessions), count: sessions.size }
+			return { file, format: fmt, default: def, sessions: Object.fromEntries(sessions), count: sessions.size }
 		},
 	}
 }
