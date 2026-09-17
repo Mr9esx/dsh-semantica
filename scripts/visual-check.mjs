@@ -176,22 +176,35 @@ await page.addScriptTag({ content: clientSource })
 // 4) 造一个假 ctx，走真的 apply()，把注册到槽里的视图组件捞出来
 await page.addScriptTag({
 	content: `
+window.__specs = {};
 window.__mount = (sessionId) => {
   const registered = {};
+  const specs = {};
   const ctx = {
     logger: { debug() {}, warn() {}, info() {} },
     on() {},
     get: (name) => (name === 'locale' ? { getSnapshot: () => ({ active: 'zh' }) } : undefined),
     slots: {
       inject(name, fn) { fn(); },
-      register(meta, component) { registered[meta.name] = component; },
+      register(meta, component) {
+        registered[meta.name] = component;
+        specs[meta.name] = meta;
+      },
     },
   };
   window.__plugin.apply(ctx);
   window.__view = registered['conversation.view'];
   window.__header = registered['conversation.session.header.actions'];
+  window.__specs = specs;
+  // 照核心的真实契约组 props：conversation.view 的注册项 inject 会收到会话 id
+  // （dsh-client-ui-renderer 的 runInject(entry, binding, actions) → binding.key），
+  // 核心自己只额外传 viewRequest / openView / completeViewRequest。
+  // **核心不传 sessionId** —— 这里也不传，否则测不出「忘了 inject」这类错。
+  const meta = specs['conversation.view'] || {};
+  const injected = typeof meta.inject === 'function' ? meta.inject(sessionId) : {};
+  const coreProps = { viewRequest: null, openView: () => {}, completeViewRequest: () => {} };
   window.__root = ReactDOM.createRoot(document.getElementById('root'));
-  window.__root.render(React.createElement(window.__view, { sessionId }));
+  window.__root.render(React.createElement(window.__view, Object.assign({}, coreProps, injected)));
   return Boolean(window.__view);
 };
 `,
@@ -199,6 +212,13 @@ window.__mount = (sessionId) => {
 
 const applied = await page.evaluate(() => window.__mount('session-visual-1'))
 check('插件 apply() 注册出了 conversation.view', applied === true)
+
+const viewMeta = await page.evaluate(() => {
+  const m = (window.__specs || {})['conversation.view'] || {}
+  return { id: m.id, order: m.order, label: typeof m.label === 'function' ? m.label() : m.label, hasInject: typeof m.inject === 'function' }
+})
+check('视图注册项 id/顺序/文案对', viewMeta.id === 'semantica-graph' && viewMeta.order === 30 && viewMeta.label === '知识图谱', JSON.stringify(viewMeta))
+check('视图注册项声明了 inject（核心不会把 sessionId 传成 props）', viewMeta.hasInject === true)
 check('头部按钮也注册了', await page.evaluate(() => Boolean(window.__header)))
 
 await page.waitForTimeout(400)

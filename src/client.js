@@ -1020,6 +1020,15 @@ window.__ModuleLoader__.load({
 						locale: NS,
 						// thunk：resolveSlotLabel 每次投影都重新求值，所以切语言时 tab 文字跟着变
 						label: () => T("tab.title"),
+						// 会话 id 从**这里**来，不是从 props 里来。
+						//
+						// conversation.view 在核心那边声明成 { kind: "list", scope: "session" }，
+						// 核心渲染它时只传 { viewRequest, openView, completeViewRequest } 三个
+						// props —— 没有 sessionId。会话 id 是走注册项的 inject 下发的：
+						// dsh-client-ui-renderer 的 runInject(entry, binding, actions) 会把
+						// binding.key（也就是会话 id）当第一个参数传进来。所以这里收回它、
+						// 再以 props 的形式交给组件。
+						inject: (sessionId) => ({ sessionId }),
 					},
 					GraphView,
 				),
