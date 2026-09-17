@@ -164,7 +164,7 @@ window.__ModuleLoader__.load({
 		// 等宽只给路径那一处 —— 路径要能一眼看出层级。
 		const CSS = `
 [data-semgp-root]{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12px}
-[data-semgp-bar]{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(128,128,128,.22)}
+[data-semgp-bar]{display:flex;align-items:center;flex-wrap:wrap;gap:8px;box-sizing:border-box;min-height:34px;padding:8px 12px;border-bottom:1px solid rgba(128,128,128,.22)}
 [data-semgp-sub]{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 12px;border-bottom:1px solid rgba(128,128,128,.14);color:rgba(128,128,128,.95)}
 [data-semgp-spacer]{flex:1 1 auto}
 [data-semgp-seg]{display:inline-flex;border:1px solid rgba(128,128,128,.35);border-radius:7px;overflow:hidden}
@@ -177,7 +177,10 @@ window.__ModuleLoader__.load({
 [data-semgp-btn][disabled]{opacity:.5;cursor:default}
 [data-semgp-path]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52ch}
 [data-semgp-body]{position:relative;flex:1 1 auto;min-height:0;display:flex}
-[data-semgp-canvas]{position:relative;flex:1 1 auto;min-width:0;min-height:0}
+/* min-height 是保命的：这根画布的高度原本全靠 height:100% 一路传下来，只要任一层祖先
+   给不出确定高度（.viewArea 是 flex:1 0 auto; min-height:auto，属于会变的那种），
+   画布就会塌成 0，图直接看不见。给个下限，链子断了也只是矮一点。*/
+[data-semgp-canvas]{position:relative;flex:1 1 auto;min-width:0;min-height:280px}
 [data-semgp-holder]{position:absolute;inset:0}
 [data-semgp-center]{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center;color:rgba(128,128,128,.95);overflow:auto}
 [data-semgp-center] strong{font-size:13px;color:inherit}
@@ -202,8 +205,11 @@ window.__ModuleLoader__.load({
 [data-semgp-row] .t{color:rgba(128,128,128,.95)}
 [data-semgp-row] .d{font-variant-numeric:tabular-nums;color:rgba(128,128,128,.95)}
 [data-semgp-chip]{display:inline-block;font-size:12px;padding:1px 7px;border:1px solid rgba(128,128,128,.3);border-radius:999px;margin:0 4px 4px 0}
-[data-semgp-bar]{height:5px;border-radius:3px;background:rgba(128,128,128,.28)}
-[data-semgp-barwrap]{display:flex;flex-direction:column;gap:3px}
+/* 注意：data-semgp-bar 是工具栏专属，别再拿去当别的用途 —— 这里曾经有一版把图表条
+   也叫 data-semgp-bar，两条规则撞在一起，后写的 height:5px 把工具栏压成一根 5px 灰条。
+   CSS 在模板字符串里，注释里不要出现反引号。*/
+[data-semgp-chartbar]{height:5px;border-radius:3px;background:rgba(128,128,128,.28)}
+[data-semgp-chart]{display:flex;flex-direction:column;gap:3px}
 [data-semgp-muted]{color:rgba(128,128,128,.95)}
 [data-semgp-frame-host]{position:fixed;z-index:5;padding:0;box-sizing:border-box;display:none;background:var(--dsw-alias-bg-base,transparent)}
 [data-semgp-frame-host] iframe{width:100%;height:100%;border:0;display:block;background:var(--dsw-alias-bg-base,transparent)}
@@ -387,6 +393,111 @@ window.__ModuleLoader__.load({
 			}
 		}
 
+		/** 把一个元素压成「够我看懂布局」的一小段描述。 */
+		function describeNode(el) {
+			if (!el) return null;
+			const cs = getComputedStyle(el);
+			const r = el.getBoundingClientRect();
+			return {
+				tag: el.tagName.toLowerCase(),
+				cls: typeof el.className === "string" ? el.className.slice(0, 90) : "",
+				data: [...el.attributes]
+					.filter((a) => a.name.startsWith("data-"))
+					.map((a) => a.name)
+					.slice(0, 8),
+				rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+				style: {
+					display: cs.display,
+					position: cs.position,
+					flex: cs.flex,
+					flexDirection: cs.flexDirection,
+					height: cs.height,
+					minHeight: cs.minHeight,
+					width: cs.width,
+					overflow: cs.overflow,
+					boxSizing: cs.boxSizing,
+					zIndex: cs.zIndex,
+					pointerEvents: cs.pointerEvents,
+					background: cs.backgroundColor,
+					opacity: cs.opacity,
+					transformed: cs.transform !== "none",
+				},
+			};
+		}
+
+		/**
+		 * 量一遍真 DOM 并回报给 host。
+		 *
+		 * 存在的理由：插件活在一个我看不见的窗口里 —— 没有截图、没有 CDP、没有 DevTools。
+		 * 布局问题一旦只能靠猜，就会修错地方（这一版真踩过：工具栏被自己写的另一条同名
+		 * 规则压成了 5px 灰条，而我离线那套假 DOM 的祖先链跟真界面不一样，测不出来）。
+		 * 所以让面板把它**自己**量到的东西回传，落成文件，我读文件就有证据。
+		 */
+		function collectDiag(reason, extra) {
+			try {
+				const one = (sel) => document.querySelector(sel);
+				const chain = [];
+				let node = one("[data-semgp-root]");
+				while (node && chain.length < 16) {
+					chain.push(describeNode(node));
+					node = node.parentElement;
+				}
+				const inner = {};
+				for (const key of ["root", "bar", "sub", "body", "canvas", "holder", "frame-host"]) {
+					inner[key] = describeNode(one(`[data-semgp-${key}]`));
+				}
+				const scroll = one("[data-conversation-scroll]");
+				const tabs = [...document.querySelectorAll('[role="tab"]')].map((t) => ({
+					text: (t.textContent || "").slice(0, 24),
+					selected: t.getAttribute("aria-selected"),
+					rect: describeNode(t)?.rect ?? null,
+				}));
+
+				// 「面板正上方那条盖着别的东西的色块」是谁 —— 灰条类问题的直接答案
+				const root = one("[data-semgp-root]");
+				const band = root ? root.getBoundingClientRect().top : null;
+				const opaqueAbove = [];
+				if (band !== null) {
+					const scope = scroll?.parentElement ?? document.body;
+					for (const el of scope.querySelectorAll("*")) {
+						if (opaqueAbove.length >= 12) break;
+						const cs = getComputedStyle(el);
+						if (cs.backgroundColor === "rgba(0, 0, 0, 0)" || cs.backgroundColor === "transparent") continue;
+						const r = el.getBoundingClientRect();
+						if (r.height < 2 || r.width < 40) continue;
+						if (r.bottom < band - 80 || r.top > band + 10) continue;
+						opaqueAbove.push({ ...describeNode(el), area: Math.round(r.width * r.height) });
+					}
+				}
+
+				return {
+					reason,
+					url: String(location.href).slice(0, 140),
+					viewport: { w: innerWidth, h: innerHeight, dpr: devicePixelRatio },
+					cssLoaded: [...document.querySelectorAll("style")].some((st) =>
+						(st.textContent || "").includes("data-semgp-canvas"),
+					),
+					chain,
+					inner,
+					tabs,
+					scroll: scroll
+						? {
+								...describeNode(scroll),
+								scrollTop: scroll.scrollTop,
+								scrollHeight: scroll.scrollHeight,
+								clientHeight: scroll.clientHeight,
+								hideComposerAttr: scroll.hasAttribute("data-semgp-hide-composer"),
+							}
+						: null,
+					seat: describeNode(one("[data-composer-seat]")),
+					opaqueAbove,
+					extra: extra ?? null,
+				};
+			} catch (err) {
+				return { reason, error: String(err?.message ?? err) };
+			}
+		}
+
 		/**
 		 * 图谱画布的占位元素 —— 真正渲染 iframe 的是 frameHost，这里只报告自己占哪儿。
 		 *
@@ -497,14 +608,14 @@ window.__ModuleLoader__.load({
 			const pct = max > 0 ? Math.max(3, Math.round((value / max) * 100)) : 0;
 			return h(
 				"div",
-				{ "data-semgp-barwrap": "" },
+				{ "data-semgp-chart": "" },
 				h(
 					"div",
 					{ "data-semgp-row": "" },
 					h("span", { className: "n" }, label),
 					h("span", { className: "d" }, hint ?? String(value)),
 				),
-				h("div", { "data-semgp-bar": "", style: { width: pct + "%" } }),
+				h("div", { "data-semgp-chartbar": "", style: { width: pct + "%" } }),
 			);
 		}
 
@@ -548,7 +659,7 @@ window.__ModuleLoader__.load({
 					h("strong", null, T("analysis.byType")),
 					h(
 						"div",
-						{ "data-semgp-barwrap": "" },
+						{ "data-semgp-chart": "" },
 						a.overview.byType
 							.slice(0, 12)
 							.map((t) => h(CountRow, { key: t.type, label: t.type, value: t.count, max: maxType })),
@@ -560,7 +671,7 @@ window.__ModuleLoader__.load({
 				const list = (title, rows) =>
 					h(
 						"div",
-						{ "data-semgp-barwrap": "", key: title },
+						{ "data-semgp-chart": "", key: title },
 						h("strong", null, title),
 						rows.length === 0
 							? h("span", { "data-semgp-muted": "" }, "—")
@@ -658,7 +769,7 @@ window.__ModuleLoader__.load({
 				{ "data-semgp-pane": "" },
 				h(
 					"div",
-					{ "data-semgp-barwrap": "" },
+					{ "data-semgp-chart": "" },
 					a.timeline.map((t) => h(CountRow, { key: t.day, label: t.day, value: t.count, max })),
 				),
 			);
@@ -793,6 +904,16 @@ window.__ModuleLoader__.load({
 					hideFrameHost();
 				};
 			}, []);
+
+			// —— 量一次真 DOM 回报给 host（等布局落定；失败就静默，绝不影响面板）——
+			useEffect(() => {
+				if (!sessionId) return undefined;
+				const timer = setTimeout(() => {
+					const diag = collectDiag("mount", { mode, stats, hasView: Boolean(view && view.url) });
+					void postJson("/api-semantica/diag", { sessionId, mode, reason: "mount", diag }).catch(() => {});
+				}, 600);
+				return () => clearTimeout(timer);
+			}, [sessionId, mode, Boolean(view && view.url)]);
 
 			const copy = useCallback(async () => {
 				const text = (status && status.instruction) || "";

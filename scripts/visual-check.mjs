@@ -121,6 +121,8 @@ let emptyMode = false
 // hostMissing：模拟「改了 host 代码还没重启」—— 路由不存在，Web 服务器回 404 的 HTML。
 let hostMissing = false
 const requestLog = []
+// 面板挂载后会回传一份真 DOM 几何（诊断用），这里收下来顺便当断言素材
+const diagBodies = []
 await page.route('**/api-semantica/**', async (route, request) => {
 	if (hostMissing) {
 		return route.fulfill({ status: 404, contentType: 'text/html', body: '<!doctype html><title>404</title>not found' })
@@ -128,6 +130,10 @@ await page.route('**/api-semantica/**', async (route, request) => {
 	const url = request.url()
 	requestLog.push(`${request.method()} ${url.split('/api-semantica')[1]} empty=${emptyMode}`)
 	const body = JSON.parse(request.postData() || '{}')
+	if (url.includes('/diag')) {
+		diagBodies.push(body)
+		return route.fulfill({ json: { ok: true, file: '/tmp/harness/last-diag.json' } })
+	}
 	if (url.includes('/status')) return route.fulfill({ json: STATUS })
 	if (url.includes('/view')) {
 		if (emptyMode) {
@@ -211,6 +217,85 @@ window.__mount = (sessionId) => {
   window.__root = ReactDOM.createRoot(document.getElementById('root'));
   window.__root.render(React.createElement(window.__view, Object.assign({}, coreProps, injected)));
   return Boolean(window.__view);
+};
+
+// 照**真界面**的祖先链挂载。
+//
+// 为什么非要这一步：原来那个 #root 是 height:820px 的确定高度，百分比链当然传得下去 ——
+// 等于把「祖先一定有高度」这个假设抄进了测试，真界面里恰恰不是这样。核心的类是
+// Sbj43W_viewArea{flex:1 0 auto;min-height:auto}，而 fake 模式再给它套一层没有确定
+// 高度的祖先，就能复现「画布塌成 0、图看不见」。
+window.__mountReal = (sessionId, options) => {
+  const opts = options || {};
+  document.getElementById('root').innerHTML = '';
+  const div = (style, attrs, kids) => {
+    const el = document.createElement('div');
+    el.setAttribute('style', style);
+    for (const [k, v] of Object.entries(attrs || {})) el.setAttribute(k, v);
+    for (const kid of kids || []) el.appendChild(kid);
+    return el;
+  };
+  const tabStrip = div('display:flex;gap:36px;margin-top:4px;padding-left:8px', {}, []);
+  tabStrip.setAttribute('role', 'tablist');
+  for (const [id, label] of [['chat', '对话'], ['semantica-graph', '知识图谱']]) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('role', 'tab');
+    b.setAttribute('aria-selected', id === 'chat' ? 'true' : 'false');
+    b.textContent = label;
+    b.addEventListener('click', () => {
+      for (const other of tabStrip.querySelectorAll('[role=tab]')) other.setAttribute('aria-selected', String(other === b));
+    });
+    tabStrip.appendChild(b);
+  }
+  const headerBtnHost = document.createElement('div');
+  const header = div('flex:none;padding:12px 28px 0 20px;border-bottom:1px solid rgba(128,128,128,.2)', {}, [tabStrip, headerBtnHost]);
+
+  const viewArea = div(
+    opts.hostile
+      ? 'display:block'                       // 祖先给不出确定高度：百分比链断在这里
+      : 'display:flex;flex-direction:column;flex:1 0 auto;min-height:auto',
+    {},
+    [],
+  );
+  const viewOutlet = div('display:contents', { 'data-slot': 'conversation.view' }, []);
+  viewArea.appendChild(viewOutlet);
+  const sessionSlot = div('display:contents', { 'data-slot': 'conversation.session' }, [viewArea]);
+
+  const seat = div('flex:none;position:sticky;bottom:0;height:120px', { 'data-composer-seat': '' }, [
+    Object.assign(document.createElement('div'), { textContent: '输入框（假）' }),
+  ]);
+  const scrollBody = div(
+    'flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden auto',
+    { 'data-conversation-scroll': '' },
+    [sessionSlot, seat],
+  );
+  const rootEl = div('height:100%;display:flex;flex-direction:column;overflow:hidden', { 'data-phase': 'active' }, [header, scrollBody]);
+  document.getElementById('root').appendChild(rootEl);
+
+  const specs = window.__specs || {};
+  const meta = specs['conversation.view'] || {};
+  const injected = typeof meta.inject === 'function' ? meta.inject(sessionId) : {};
+  const coreProps = { viewRequest: null, openView: () => {}, completeViewRequest: () => {} };
+  window.__chain = { rootEl, scrollBody, seat, viewArea, viewOutlet, tabStrip };
+  window.__root = ReactDOM.createRoot(viewOutlet);
+  window.__root.render(React.createElement(window.__view, Object.assign({}, coreProps, injected)));
+  // 头部入口按钮也照真实契渲染（它的 openPanel 是注册项 inject 给的）
+  const headerMeta = specs['conversation.session.header.actions'] || {};
+  const headerProps = typeof headerMeta.inject === 'function' ? headerMeta.inject(sessionId) : {};
+  window.__headerRoot = ReactDOM.createRoot(headerBtnHost);
+  window.__headerRoot.render(React.createElement(window.__header, headerProps));
+  return true;
+};
+
+// 头部入口按钮：点它应该就等于点标签条上「知识图谱」那个 tab
+window.__clickHeaderButton = () => {
+  const btn = [...document.querySelectorAll('button')].find(
+    (b) => !b.getAttribute('role') && (b.textContent || '').trim() === '知识图谱',
+  );
+  if (!btn) return false;
+  btn.click();
+  return true;
 };
 `,
 })
@@ -374,6 +459,16 @@ const drawer = await page.evaluate(() => {
 		fontSizes: [...new Set([...aside.querySelectorAll('*')].map(px))],
 	}
 })
+const chartBar = await page.evaluate(() => {
+	const el = document.querySelector('[data-semgp-chartbar]')
+	return el ? { h: getComputedStyle(el).height, w: Math.round(el.getBoundingClientRect().width) } : null
+})
+check(
+	'图表条还是 5px 细条（和工具栏解耦后那条规则仍然生效）',
+	chartBar?.h === '5px' && chartBar.w > 0,
+	JSON.stringify(chartBar),
+)
+
 check('分析抽屉打得开', Boolean(drawer && drawer.exists))
 check('五个标签页都在', Boolean(drawer && drawer.tabs.length === 5), drawer ? drawer.tabs.join('/') : '')
 check('概览里算出来的数字进了界面', Boolean(drawer && drawer.text.includes('连通分量')), drawer ? drawer.text.slice(0, 90) : '')
@@ -446,6 +541,107 @@ hostMissing = false
 		phaseErrors.join(' | ') || '（无）',
 	)
 }
+
+// ══ 第二阶段：照真界面祖先链重挂一次 ══
+//
+// 第一阶段的 #root 是 height:820px 的确定高度 —— 百分比链当然传得下去。真界面里
+// .viewArea 是 flex:1 0 auto; min-height:auto，所以这里必须换成真的链子，否则
+// 「工具栏被压扁」「画布塌成 0」这类问题离线永远测不出来。
+
+await page.evaluate(() => {
+	try {
+		window.__root.unmount()
+		window.__headerRoot?.unmount()
+	} catch {
+		/* 卸载失败不影响后面的重挂 */
+	}
+})
+await page.evaluate(() => window.__mountReal('session-visual-1'))
+await page.waitForTimeout(1200)
+
+const real = await page.evaluate(() => {
+	const q = (sel) => document.querySelector(sel)
+	const cs = (el) => (el ? getComputedStyle(el) : null)
+	const rect = (el) => {
+		if (!el) return null
+		const r = el.getBoundingClientRect()
+		return { w: Math.round(r.width), h: Math.round(r.height), top: Math.round(r.top) }
+	}
+	const bar = q('[data-semgp-bar]')
+	const canvas = q('[data-semgp-canvas]')
+	const root = q('[data-semgp-root]')
+	const seat = q('[data-composer-seat]')
+	const scroll = q('[data-conversation-scroll]')
+	const barRect = bar?.getBoundingClientRect()
+	return {
+		bar: rect(bar),
+		barBg: cs(bar)?.backgroundColor ?? null,
+		barMinHeight: cs(bar)?.minHeight ?? null,
+		// 子元素底边超出工具栏底边多少 —— 压扁了就会是个正数
+		barChildOverflow: barRect
+			? Math.round(Math.max(...[...bar.children].map((c) => c.getBoundingClientRect().bottom)) - barRect.bottom)
+			: null,
+		canvas: rect(canvas),
+		canvasMinHeight: cs(canvas)?.minHeight ?? null,
+		rootRect: rect(root),
+		viewArea: rect(q('[data-slot="conversation.view"]')?.parentElement),
+		holder: rect(q('[data-semgp-holder]')),
+		hostDisplay: cs(q('[data-semgp-frame-host]'))?.display ?? null,
+		hostHost: rect(document.querySelector('[data-semgp-frame-host]')),
+		seatDisplay: cs(seat)?.display ?? null,
+		hideAttr: scroll?.hasAttribute('data-semgp-hide-composer') ?? null,
+		chartBarH: cs(q('[data-semgp-chartbar]'))?.height ?? null,
+	}
+})
+
+check('工具栏没有被压扁（曾经有同名规则把 height 改成 5px、底色改灰）', real.bar.h >= 20 && real.barBg === 'rgba(0, 0, 0, 0)', JSON.stringify({ h: real.bar.h, bg: real.barBg }))
+check('工具栏的子元素不溢出它的盒子', real.barChildOverflow !== null && real.barChildOverflow <= 2, String(real.barChildOverflow))
+check('画布在真祖先链下拿到了高度，不是 0', real.canvas.h >= 200, JSON.stringify({ canvas: real.canvas, viewArea: real.viewArea }))
+check('面板铺满视图区', Math.abs(real.rootRect.h - real.viewArea.h) <= 2, JSON.stringify({ root: real.rootRect, viewArea: real.viewArea }))
+check('iframe 宿主跟着画布，不再是 0×0', real.hostHost.w >= 200 && real.hostHost.h >= 200, JSON.stringify(real.hostHost))
+check('图谱标签下输入框被藏住（不然还能操作背后的对话）', real.hideAttr === true && real.seatDisplay === 'none', JSON.stringify({ hideAttr: real.hideAttr, seatDisplay: real.seatDisplay }))
+
+// 头部入口按钮 → 切标签（走的是真 activateViewTab：按 tab 文字匹配）
+const clicked = await page.evaluate(() => window.__clickHeaderButton())
+await page.waitForTimeout(150)
+const tabState = await page.evaluate(() =>
+	[...document.querySelectorAll('[role="tab"]')].map((t) => ({ text: t.textContent, selected: t.getAttribute('aria-selected') })),
+)
+check(
+	'点头部按钮能切到图谱标签',
+	clicked === true && tabState.some((t) => t.text === '知识图谱' && t.selected === 'true'),
+	JSON.stringify(tabState),
+)
+
+// 诊断通道：面板把自己量到的真 DOM 回传了（host 会落成 last-diag.json）
+const diag = diagBodies.at(-1)?.diag
+check('面板回传了真 DOM 几何（诊断通道）', Boolean(diag && Array.isArray(diag.chain) && diag.chain.length >= 2), JSON.stringify({ chain: diag?.chain?.length, reason: diag?.reason }))
+check(
+	'诊断里带了滚动容器 / 输入框 / 是否隐藏的状态',
+	Boolean(diag?.scroll && diag.scroll.hideComposerAttr !== undefined && diag.seat && diag.cssLoaded === true),
+	JSON.stringify({ hide: diag?.scroll?.hideComposerAttr, seat: diag?.seat?.tag, css: diag?.cssLoaded }),
+)
+
+// ── 第三阶段：祖先给不出确定高度时，图也不能消失 ──
+await page.evaluate(() => {
+	try {
+		window.__root.unmount()
+	} catch {
+		/* ignore */
+	}
+})
+await page.evaluate(() => window.__mountReal('session-visual-1', { hostile: true }))
+await page.waitForTimeout(900)
+const hostile = await page.evaluate(() => {
+	const rect = (sel) => {
+		const el = document.querySelector(sel)
+		if (!el) return null
+		const r = el.getBoundingClientRect()
+		return { w: Math.round(r.width), h: Math.round(r.height) }
+	}
+	return { canvas: rect('[data-semgp-canvas]'), host: rect('[data-semgp-frame-host]'), minH: getComputedStyle(document.querySelector('[data-semgp-canvas]')).minHeight }
+})
+check('祖先给不出高度时画布仍有下限高度（保命，不是靠运气）', hostile.canvas.h >= 280 && hostile.minH === '280px', JSON.stringify(hostile))
 
 // ── 页面级错误 ──
 

@@ -13,7 +13,7 @@
 //
 // 用法：node scripts/selftest.mjs
 
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -313,8 +313,13 @@ check(
 	check('变量没注册上时不留段落（否则每次提示词组装都会抛）', sections2.length === 0, `sections=${sections2.length}`)
 }
 
-const wantPaths = ['/api-semantica/status', '/api-semantica/view', '/api-semantica/analysis']
-check('三个路由都注册了', wantPaths.every((p) => routes.has(p)), [...routes.keys()].join(', '))
+const wantPaths = [
+	'/api-semantica/status',
+	'/api-semantica/view',
+	'/api-semantica/analysis',
+	'/api-semantica/diag',
+]
+check('四个路由都注册了', wantPaths.every((p) => routes.has(p)), [...routes.keys()].join(', '))
 
 /** 假的 req / res，够 readBody 与 send 用。 */
 function fakeReq(url, body) {
@@ -379,6 +384,23 @@ if (viewRes.json.viewPath) {
 const anaRes = await call('/api-semantica/analysis', { body: { sessionId: SESSION_A, mode: 'conversation' } })
 check('analysis 返回分析结果', anaRes.json.ok === true && anaRes.json.analysis?.decisions?.length === 2, JSON.stringify({ ok: anaRes.json.ok, d: anaRes.json.analysis?.decisions?.length }))
 check('analysis 里有枢纽与时间线', (anaRes.json.analysis?.hubs?.byDegree?.length ?? 0) > 0 && (anaRes.json.analysis?.timeline?.length ?? 0) > 0)
+
+// 界面诊断：前端回传的真 DOM 几何要落盘（我看不见那个窗口，只能靠这条通道）
+const diagRes = await call('/api-semantica/diag', {
+	body: {
+		sessionId: SESSION_A,
+		reason: 'mount',
+		diag: { reason: 'mount', cssLoaded: true, chain: [{ tag: 'div' }, { tag: 'body' }], inner: { bar: { rect: [0, 0, 900, 34] } } },
+	},
+})
+check('诊断回传被接受', diagRes.status === 200 && diagRes.json.ok === true, JSON.stringify(diagRes.json))
+const diagFile = join(work, 'dsh-semantica-graph', 'last-diag.json')
+const diagDisk = existsSync(diagFile) ? JSON.parse(readFileSync(diagFile, 'utf8')) : null
+check(
+	'诊断落盘了（host 写文件，之后我读文件就有证据）',
+	diagDisk?.sessionId === SESSION_A && diagDisk?.diag?.chain?.length === 2 && typeof diagDisk.receivedAt === 'string',
+	JSON.stringify(diagDisk && { sessionId: diagDisk.sessionId, chain: diagDisk.diag?.chain?.length, receivedAt: diagDisk.receivedAt }),
+)
 
 const allRes = await call('/api-semantica/analysis', { body: { sessionId: SESSION_A, mode: 'all' } })
 check('「全部」模式看到整张图', allRes.json.stats?.nodes === graph.nodes.length, `${allRes.json.stats?.nodes} vs ${graph.nodes.length}`)

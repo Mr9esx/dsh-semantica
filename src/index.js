@@ -18,7 +18,7 @@
 // webServer 是可选且晚挂载的 host 服务，因此路由用 ctx.inject(['webServer'], …)
 // 延迟注册：headless / 无 Web 的 profile 下回调不执行，插件照常激活。
 
-import { readFileSync, existsSync, readdirSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { ExplorerHost, probeExplorer, resolvePython } from './explorer.js'
@@ -116,6 +116,11 @@ function mcpConfigured(home) {
 /** MCP 的图文件路径（安装脚本写进 SEMANTICA_KG_PATH 的就是它）。 */
 function kgPath(home) {
 	return join(home, DATA_DIR, 'kg.json')
+}
+
+/** 界面诊断落盘的位置。 */
+function diagPath(home) {
+	return join(home, DATA_DIR, 'last-diag.json')
 }
 
 /** 视图图文件。按 key 分开 —— 一个会话一张，'all' 一张。 */
@@ -239,6 +244,29 @@ function apply(ctx, config) {
 						prompt: { injected: wantsPrompt, section: SECTION_NAME },
 						instruction: sessionId ? instructionFor(sessionId) : null,
 					})
+				} catch (err) {
+					send(res, 200, { ok: false, error: String(err?.message ?? err) })
+				}
+			},
+		})
+
+		// —— 界面诊断：把前端量到的真 DOM 几何落到磁盘 ——
+		//
+		// 为什么要有这条：插件改的是宿主里的一个真实窗口，而我看不见那个窗口（没有截图、
+		// 没有 CDP）。布局类问题只能靠猜，猜错就是修错地方。所以让前端把它**自己**量到的
+		// 祖先链、计算样式、各块矩形回传，host 写成一个 JSON —— 之后我读文件就有证据了。
+		ws.register({
+			kind: 'exact',
+			path: '/api-semantica/diag',
+			handler: async (req, res) => {
+				try {
+					const body = await readBody(req)
+					const payload = { ...body, receivedAt: new Date().toISOString() }
+					const file = diagPath(home)
+					mkdirSync(join(home, DATA_DIR), { recursive: true })
+					writeFileSync(file, JSON.stringify(payload, null, 1))
+					note(ctx, 'debug', `semantica-graph: 收到界面诊断（${body?.reason ?? '?'}）→ ${file}`)
+					send(res, 200, { ok: true, file })
 				} catch (err) {
 					send(res, 200, { ok: false, error: String(err?.message ?? err) })
 				}
