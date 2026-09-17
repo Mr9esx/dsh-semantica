@@ -79,6 +79,7 @@
 | 这台机器上还没有写过任何知识图谱 | 图还没建过 → 点「复制提取指令」粘给模型 |
 | 本对话在图里还没有节点 | 这次对话还没被提取过 → 点面板里那个「开启每轮自动提取」，或者点「复制提取指令」当场补一次 |
 | 图没打开：Explorer 没有响应 | 那个 Explorer 子进程已经死了或刚被回收（15 秒没加载出来就会这么写）→ 点「重试」 |
+| 图里还是老内容 | Explorer 启动时只读一次图、前端还会沿用已有 iframe → 点「刷新」重建；改了切图规则的话 key 会变，重开面板就是新的 |
 | 黄色横幅：MCP 工具没挂上 | profile 里那条 `mcp-semantica` 丢了 → `node scripts/install.mjs` 后重启 |
 | Explorer 依赖不可用 | venv 里缺 `fastapi`/`uvicorn`，按提示装的路径检查 |
 
@@ -178,6 +179,11 @@ add_relationship(source, target, type, metadata = { "conversation": "<sessionId>
 每张切好的图写成 `<harness>/dsh-semantica-graph/views/view-<key>.json`，再交给 Explorer。
 `semantica.explorer --graph` 是**启动时读一次**，所以图变了就得重启那个子进程 ——
 `ExplorerHost` 按 key 管实例（最多 3 个，闲置 10 分钟回收），点「刷新」就是重建一个。
+
+**`<key>` 末尾带着切图规则的版本号**（`kg.js` 里的 `SCOPE_VERSION`）。这不是装饰：Explorer
+只在启动时读图，前端切标签回来还会**沿用**已经建好的那个 iframe —— 所以「改了认领规则」
+如果不换 key，用户重新点开面板看到的还是按旧规则切的图，会以为 bug 没修。规则一改就
+把版本号 +1，旧视图与旧实例自然失效，下次打开必然是新的。（views 目录只留最近 12 份。）
 
 ---
 

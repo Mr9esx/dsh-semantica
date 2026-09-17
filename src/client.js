@@ -855,11 +855,17 @@ window.__ModuleLoader__.load({
 			const [fallbackStats, setFallbackStats] = useState(null);
 			const [copied, setCopied] = useState(false);
 
-			const viewKey = mode + ":" + sessionId;
+			// 视图键要和 host 那边算的一致（`/view` 里同一个字符串），它决定「沿用已有
+			// iframe」还是「重新出图」。末尾的 `v<规则版本>` 是关键：切图规则一变，旧视图
+			// 立刻不再匹配，用户重新点开面板就会拿到新图，而不是被沿用下来的旧图骗了。
+			const scopeVersion = status && status.scope ? status.scope.version : null;
+			const viewKey = mode + ":" + sessionId + ":v" + (scopeVersion ?? "?");
 
 			// —— 状态：图在哪、MCP 配没配、Explorer 依赖齐不齐、可复制的指令 ——
+			const [statusDone, setStatusDone] = useState(false);
 			useEffect(() => {
 				let alive = true;
+				setStatusDone(false);
 				(async () => {
 					try {
 						const data = await getJson(
@@ -868,6 +874,10 @@ window.__ModuleLoader__.load({
 						if (alive) setStatus(data);
 					} catch (e) {
 						if (alive) setStatus({ ok: false, code: e?.code ?? "request-failed", error: String(e?.message ?? e) });
+					} finally {
+						// 成功失败都算「落地了」——失败时也要放行出图请求，否则面板会卡在空白上，
+						// 连「host 半侧没加载」这种提示都出不来。
+						if (alive) setStatusDone(true);
 					}
 				})();
 				return () => {
@@ -924,8 +934,11 @@ window.__ModuleLoader__.load({
 
 			useEffect(() => {
 				if (!sessionId) return;
+				// 等 status 落地再出图：视图键里的规则版本来自它，不等的话会先按 "?" 出一次、
+				// 拿到版本号再出第二次（白启一个 Explorer）。status 失败也算落地（要走错误态）。
+				if (!statusDone) return;
 				open(false);
-			}, [sessionId, viewKey, open]);
+			}, [sessionId, viewKey, open, statusDone]);
 
 			// —— 分析：抽屉打开时算一次，切模式/重新出图后重算 ——
 			useEffect(() => {

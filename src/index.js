@@ -18,11 +18,19 @@
 // webServer 是可选且晚挂载的 host 服务，因此路由用 ctx.inject(['webServer'], …)
 // 延迟注册：headless / 无 Web 的 profile 下回调不执行，插件照常激活。
 
-import { readFileSync, existsSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs'
+import { readFileSync, existsSync, readdirSync, statSync, unlinkSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { ExplorerHost, probeExplorer, resolvePython } from './explorer.js'
-import { analyze, graphMtime, readGraph, scopeGraph, summarize, writeGraphFile } from './kg.js'
+import {
+	SCOPE_VERSION,
+	analyze,
+	graphMtime,
+	readGraph,
+	scopeGraph,
+	summarize,
+	writeGraphFile,
+} from './kg.js'
 import {
 	DIRECTIVE_VARIABLE,
 	SECTION_NAME,
@@ -141,6 +149,40 @@ function diagPath(home) {
 function viewPath(home, key) {
 	const safe = key.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 120)
 	return join(home, DATA_DIR, 'views', `view-${safe}.json`)
+}
+
+/** views 目录里最多留这么多份（含刚写的那份）。 */
+const VIEW_KEEP = 12
+
+/**
+ * 收拾 views 目录：只留最近写过的几份。
+ *
+ * 视图文件是「每次出图一份」，规则版本一变旧的就没人用了；不收拾的话它会一直涨
+ * （每个几 KB，长期跑下来也能堆出不少）。
+ *
+ * @param keep 当前这份不算在保留名额之外 —— 所以保留总数含它。
+ */
+function pruneViews(home, keep) {
+	try {
+		const dir = join(home, DATA_DIR, 'views')
+		const files = readdirSync(dir)
+			.filter((f) => f.startsWith('view-') && f.endsWith('.json'))
+			.map((f) => {
+				const full = join(dir, f)
+				return { full, mtime: statSync(full).mtimeMs }
+			})
+			.filter((f) => f.full !== keep)
+			.sort((a, b) => b.mtime - a.mtime)
+		for (const f of files.slice(VIEW_KEEP - 1)) {
+			try {
+				unlinkSync(f.full)
+			} catch {
+				// 删不掉（别人正拿着）也无所谓，下次再说
+			}
+		}
+	} catch {
+		// 目录不存在 / 没权限都不影响出图
+	}
 }
 
 /**
@@ -267,6 +309,7 @@ function apply(ctx, config) {
 							running: explorers.snapshot(),
 						},
 						prompt: { injected: wantsPrompt, section: SECTION_NAME, directive: DIRECTIVE_VARIABLE },
+						scope: { version: SCOPE_VERSION },
 						auto: { on: autos.isOn(sessionId) },
 						instruction: sessionId ? instructionFor(sessionId) : null,
 					})
@@ -350,8 +393,10 @@ function apply(ctx, config) {
 					}
 
 					const { scoped, kg } = await loadScoped(ctx, sessionId, mode)
-					const key = mode === 'all' ? 'all' : `conversation:${sessionId}`
+					// key 里带规则版本：规则改了，旧视图文件和旧 Explorer 实例就都不再匹配
+					const key = `${mode === 'all' ? 'all' : `conversation:${sessionId}`}:v${SCOPE_VERSION}`
 					const out = viewPath(home, key)
+					pruneViews(home, out)
 					writeGraphFile(out, `semantica-graph:${key}`, scoped.nodes, scoped.edges)
 					const { url } = await explorers.start(key, out)
 

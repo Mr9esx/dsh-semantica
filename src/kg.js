@@ -179,6 +179,18 @@ function cleanEdges(edges, byId) {
  * 一天里连着聊几个会话时，同一个没打标的决策会被**每一个**时间覆盖它的会话同时认领，
  * 于是「我根本没提取过的对话」里冒出了别人的 6 个节点。宁可少认，不能认错。
  */
+/**
+ * 切图规则的版本号。**改了认领规则就 +1。**
+ *
+ * 为什么要有这么个东西：Explorer 是启动时读一次图，出好的图还会被前端沿用（切标签
+ * 回来不重新出图）。于是「规则的改动」在界面上生效不了 —— 用户重新点开面板，看到的
+ * 还是按**旧规则**切出来的那张图，会以为 bug 没修。
+ *
+ * 这个版本号进视图的 key，所以规则一变，旧的视图文件与 Explorer 实例自然失效，
+ * 面板下次打开必然重新出图。v2 = 删掉时间窗兜底认领的那一版。
+ */
+export const SCOPE_VERSION = 2
+
 export function scopeGraph(graph, opts) {
 	const sessionId = String(opts.sessionId ?? '')
 	const mode = opts.mode === 'all' ? 'all' : 'conversation'

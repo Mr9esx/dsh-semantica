@@ -66,6 +66,8 @@ const STATUS = {
 	mcp: { configured: true },
 	explorer: { ok: true, version: '0.6.8', python: '/x/python', missing: [], hint: null, running: [] },
 	prompt: { injected: true, section: 'plugin:semantica-graph', directive: 'semantica_directive' },
+	// 切图规则版本：它进视图键，规则一变旧图就不再被沿用
+	scope: { version: 2 },
 	instruction: '把这次对话的知识写进 Semantica 知识图谱…',
 }
 
@@ -123,6 +125,8 @@ let emptyMode = false
 let hostMissing = false
 // 「每轮自动提取」开关的假后端：/auto 改它，/status 读它
 let autoOn = false
+// 切图规则版本（假 host 侧的），用来验「规则变了，旧图还能不能被沿用」
+let stubScopeVersion = 2
 // hangMode：/view 给一个「连得上但永远不回应」的地址 —— 用来验「iframe 永远不 load」时
 // 面板会不会一直转圈（用户报的就是这个症状）
 let hangMode = false
@@ -145,14 +149,15 @@ await page.route('**/api-semantica/**', async (route, request) => {
 		diagBodies.push(body)
 		return route.fulfill({ json: { ok: true, file: '/tmp/harness/last-diag.json' } })
 	}
-	if (url.includes('/status')) return route.fulfill({ json: { ...STATUS, auto: { on: autoOn } } })
+	if (url.includes('/status'))
+		return route.fulfill({ json: { ...STATUS, scope: { version: stubScopeVersion }, auto: { on: autoOn } } })
 	if (url.includes('/auto')) {
 		autoOn = body.on === true
 		return route.fulfill({ json: { ok: true, on: autoOn } })
 	}
 	if (url.includes('/view')) {
 		if (hangMode) {
-			return route.fulfill({ json: { ok: true, url: HANG_URL, mode: body.mode, key: `${body.mode}:${body.sessionId}`, stats: STATS, claim: CLAIM, kg: KG, ms: 9 } })
+			return route.fulfill({ json: { ok: true, url: HANG_URL, mode: body.mode, key: `${body.mode}:${body.sessionId}:v${stubScopeVersion}`, stats: STATS, claim: CLAIM, kg: KG, ms: 9 } })
 		}
 		if (emptyMode) {
 			return route.fulfill({
@@ -160,7 +165,7 @@ await page.route('**/api-semantica/**', async (route, request) => {
 					ok: true,
 					url: VIEW_URL,
 					mode: body.mode,
-					key: `${body.mode}:${body.sessionId}`,
+					key: `${body.mode}:${body.sessionId}:v${stubScopeVersion}`,
 					stats: { ...STATS, nodes: 0, edges: 0, entities: 0, relations: 0, decisions: 0 },
 					claim: { tagged: 0, byEntity: 0, untagged: 3, totalSemantic: 33, untaggedDecisions: 2 },
 					kg: KG,
@@ -169,7 +174,16 @@ await page.route('**/api-semantica/**', async (route, request) => {
 			})
 		}
 		return route.fulfill({
-			json: { ok: true, url: VIEW_URL, mode: body.mode, key: `${body.mode}:${body.sessionId}`, stats: STATS, claim: CLAIM, kg: KG, ms: 37 },
+			json: {
+				ok: true,
+				url: VIEW_URL,
+				mode: body.mode,
+				key: `${body.mode}:${body.sessionId}:v${stubScopeVersion}`,
+				stats: STATS,
+				claim: CLAIM,
+				kg: KG,
+				ms: 37,
+			},
 		})
 	}
 	if (url.includes('/analysis')) return route.fulfill({ json: { ok: true, mode: body.mode, stats: STATS, claim: CLAIM, analysis: ANALYSIS, ms: 21 } })
@@ -672,6 +686,36 @@ hostMissing = false
 		phaseErrors.join(' | ') || '（无）',
 	)
 }
+
+// ── 切图规则改版之后，旧图不能再被沿用 ──
+//
+// Explorer 启动时只读一次图，前端切标签回来还会沿用已有的 iframe。所以「规则改了」
+// 如果只改代码，用户重新点开面板看到的还是旧规则切出来的图 —— 会以为 bug 没修。
+// 视图键里带规则版本就是为了这个。这里验一对反例：
+//   同版本重挂 → 沿用（不再发第二次出图请求）；版本变了 → 必须重新出图。
+
+// 先出一次图（这一次本来就要请求），再重挂同一个会话：这一次该沿用，不该再请求
+await page.evaluate(() => window.__resetTree())
+await page.evaluate(() => window.__mountReal('session-visual-1'))
+await page.waitForTimeout(1100)
+const beforeAdopt = requestLog.filter((r) => r.includes('/view')).length
+await page.evaluate(() => window.__resetTree())
+await page.evaluate(() => window.__mountReal('session-visual-1'))
+await page.waitForTimeout(1100)
+const afterAdopt = requestLog.filter((r) => r.includes('/view')).length
+check('同版本重挂时沿用已有的图（不重复起 Explorer）', afterAdopt === beforeAdopt, `${beforeAdopt} → ${afterAdopt}`)
+
+stubScopeVersion = 3
+await page.evaluate(() => window.__resetTree())
+await page.evaluate(() => window.__mountReal('session-visual-1'))
+await page.waitForTimeout(1100)
+const afterVersionBump = requestLog.filter((r) => r.includes('/view')).length
+check(
+	'切图规则版本一变，必须重新出图（不然用户看到的还是旧规则的图）',
+	afterVersionBump > afterAdopt,
+	`${afterAdopt} → ${afterVersionBump}`,
+)
+stubScopeVersion = 2
 
 // ══ 第二阶段：照真界面祖先链重挂一次 ══
 //

@@ -19,7 +19,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
-import { analyze, readGraph, scopeGraph, summarize, writeGraphFile } from '../src/kg.js'
+import { SCOPE_VERSION, analyze, readGraph, scopeGraph, summarize, writeGraphFile } from '../src/kg.js'
 import { ExplorerHost, probeExplorer, resolvePython } from '../src/explorer.js'
 import {
 	DIRECTIVE_VARIABLE,
@@ -394,6 +394,11 @@ async function call(path, { query = '', body } = {}) {
 
 const autoOff = await call('/api-semantica/status', { query: `?sessionId=${SESSION_A}` })
 check('status 报出开关状态（默认关）', autoOff.json.auto?.on === false, JSON.stringify(autoOff.json.auto))
+check(
+	'status 报出切图规则版本（前端拿它当视图键的一部分）',
+	autoOff.json.scope?.version === SCOPE_VERSION,
+	JSON.stringify(autoOff.json.scope),
+)
 
 const autoOn = await call('/api-semantica/auto', { body: { sessionId: SESSION_A, on: true } })
 check('开关能打开', autoOn.json.ok === true && autoOn.json.on === true, JSON.stringify(autoOn.json))
@@ -443,6 +448,17 @@ const viewRes = await call('/api-semantica/view', { body: { sessionId: SESSION_A
 check('view 出图成功并给了 URL', viewRes.status === 200 && viewRes.json.ok === true, JSON.stringify({ ok: viewRes.json.ok, err: viewRes.json.error, url: viewRes.json.url }))
 check('view 的统计是切过的图（不含别的会话）', viewRes.json.stats?.nodes === scopedA.nodes.length, JSON.stringify(viewRes.json.stats && { n: viewRes.json.stats.nodes, d: viewRes.json.stats.decisions }))
 check('view 视图文件写到了 views/ 下', Boolean(viewRes.json.viewPath && viewRes.json.viewPath.includes('views')), String(viewRes.json.viewPath))
+// 视图键里带规则版本 —— 规则改了，旧的视图文件与 Explorer 实例就不再被沿用
+check(
+	'视图键里带切图规则版本',
+	String(viewRes.json.key ?? '').endsWith(`:v${SCOPE_VERSION}`),
+	String(viewRes.json.key),
+)
+check(
+	'视图文件名里也带版本（旧规则那份不会顶上来）',
+	String(viewRes.json.viewPath ?? '').includes(`v${SCOPE_VERSION}.json`),
+	String(viewRes.json.viewPath ?? '').split('/').pop(),
+)
 if (viewRes.json.viewPath) {
 	const written = JSON.parse(readFileSync(viewRes.json.viewPath, 'utf8'))
 	check('视图文件形状对（graph_id/nodes/edges）', written.graph_id.startsWith('semantica-graph:') && Array.isArray(written.nodes) && Array.isArray(written.edges), `${written.nodes.length} 节点`)
