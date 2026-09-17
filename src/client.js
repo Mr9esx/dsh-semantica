@@ -3,8 +3,11 @@
 // dsh-semantica-graph 的浏览器半侧。
 //
 // 两个贡献点，都注册在**核心包**的槽上，因此不依赖任何第三方插件：
-//   1. conversation.view —— 对话顶部标签里的「知识图谱」
-//   2. conversation.session.header.actions —— 会话标题右侧的入口按钮，点了切到上面那个标签
+//   1. conversation.view —— 对话顶部标签里的「知识图谱」（打开面板的唯一入口）
+//   2. conversation.input.right —— 输入框那一排右侧的「每轮提取 关/开」开关
+//
+// 只有这两处。会话标题右侧原来还挂过「打开知识图谱」和同名开关两个按钮 —— 用户明确
+// 要求去掉（「插件只需要 tab 和 input 的开关」），所以标题那一排现在完全归核心。
 //
 // ## 界面分三块，来源各不相同
 //
@@ -48,7 +51,6 @@ window.__ModuleLoader__.load({
 
 		const zh = {
 			"tab.title": "知识图谱",
-			"action.open": "打开知识图谱",
 			"action.refresh": "刷新",
 			"action.analysis": "分析",
 			"action.external": "在浏览器打开",
@@ -114,7 +116,6 @@ window.__ModuleLoader__.load({
 
 		const en = {
 			"tab.title": "Knowledge graph",
-			"action.open": "Open knowledge graph",
 			"action.refresh": "Refresh",
 			"action.analysis": "Analysis",
 			"action.external": "Open in browser",
@@ -1224,21 +1225,13 @@ window.__ModuleLoader__.load({
 		 * 会话标题右侧的「知识图谱」按钮：切到上面那个视图。
 		 *
 		 * 核心**没有**程序化切换视图的 API：`openView` 只作为 conversation.view 组件的
-		 * prop 传给视图自己，头部动作槽拿不到；tab 按钮的 DOM 上也没有 data-id，
-		 * 只有 role=tab 和文字。所以按文字找那个按钮再 click —— 已装插件
-		 * dsh-context 的「跳转到上下文」用的就是同一招。
-		 */
-		function activateViewTab(label) {
-			const tabs = document.querySelectorAll('[role="tablist"] [role="tab"]');
-			for (const t of tabs) {
-				if (t.textContent.trim() !== label) continue;
-				if (t.getAttribute("aria-selected") !== "true") t.click();
-				return true;
-			}
-			return false;
-		}
-
-		/** 开关变化时在窗口里广播的事件名（两处入口都在同一个窗口里）。 */
+		 * prop 传给视图自己，别处拿不到；tab 按钮的 DOM 上也没有 data-id，只有 role=tab
+		 * 和文字。要切视图只能按文字找到那个按钮再 click
+		 * （已装插件 dsh-context 的「跳转到上下文」用的就是同一招）。
+		 *
+		 * 这段知识现在没有调用方了 —— 头部那个「打开知识图谱」按钮已经按用户要求去掉，
+		 * 用户直接点标签就行。留在注释里，免得以后又要重新踩一遍。
+		 */		/** 开关变化时在窗口里广播的事件名（两处入口都在同一个窗口里）。 */
 		const AUTO_EVENT = "semgp-auto";
 
 		/**
@@ -1366,6 +1359,11 @@ window.__ModuleLoader__.load({
 							? getComputedStyle(el.closest("[data-composer-seat]")).display
 							: null,
 						text: (el.textContent || "").trim(),
+						// 头部有没有残留的插件按钮：既不在面板里、也不在输入框那一排的，
+						// 就只可能挂在标题那一排。用户要求那儿一个都不留，所以期望是 []。
+						strayButtons: [...document.querySelectorAll("[data-semgp-btn]")]
+							.filter((b) => !b.closest("[data-semgp-root]") && !b.closest("[data-composer-seat]"))
+							.map((b) => (b.textContent || "").trim()),
 					});
 					void postJson("/api-semantica/diag", {
 						sessionId,
@@ -1398,22 +1396,6 @@ window.__ModuleLoader__.load({
 					onClick: flip,
 				},
 				on === true ? `● ${label}` : label,
-			);
-		}
-
-		function GraphButton(props) {
-			const open = props.openPanel;
-			return h(
-				"button",
-				{
-					type: "button",
-					"data-semgp-btn": "",
-					title: T("action.open"),
-					onClick: () => {
-						if (typeof open === "function") open();
-					},
-				},
-				T("tab.title"),
 			);
 		}
 
@@ -1518,38 +1500,9 @@ window.__ModuleLoader__.load({
 				),
 			);
 
-			// 2b) 会话标题右侧也留一个（同一开关的另一处入口）。留在那儿是因为切到
-			// 「知识图谱」标签时输入框会被藏起来，标题那一排仍然在。
-
-			ctx.slots.inject("conversation.session.header.actions", () =>
-				ctx.slots.register(
-					{
-						name: "conversation.session.header.actions",
-						id: "semantica-auto",
-						order: 29,
-						locale: NS,
-						// 头部槽同样是 session 作用域：会话 id 走 inject 下发，不是 props
-						inject: (sessionId) => ({ sessionId }),
-					},
-					AutoButton,
-				),
-			);
-
-			// 3) 头部动作按钮：切到上面那个 tab
-			ctx.slots.inject("conversation.session.header.actions", () =>
-				ctx.slots.register(
-					{
-						name: "conversation.session.header.actions",
-						id: VIEW_ID,
-						order: 30,
-						locale: NS,
-						inject: () => ({
-							openPanel: () => activateViewTab(T("tab.title")),
-						}),
-					},
-					GraphButton,
-				),
-			);
+			// 这里曾经还注册了会话标题右侧的两个按钮（一个切到上面这个 tab，一个同名开关）。
+			// 用户的判词是「上面 header 的按钮都去掉吧……插件只需要 tab 和 input 的开关」，
+			// 所以那两处去掉了。少一点侵入是对的：标题那一排是核心的地盘。
 		}
 
 		exports.apply = apply;

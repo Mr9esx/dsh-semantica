@@ -244,7 +244,7 @@ window.__mount = (sessionId) => {
     slots: {
       inject(name, fn) { fn(); },
       register(meta, component) {
-        // 一个槽可以注册多个：头部现在是「每轮提取开关」+「打开面板」两个按钮
+        // 一个槽可以注册多个（插件现在只在 input.right 注册一个，但契约本身是 list）
         (registered[meta.name] ||= []).push(component);
         (specs[meta.name] ||= []).push(meta);
       },
@@ -252,9 +252,10 @@ window.__mount = (sessionId) => {
   };
   window.__plugin.apply(ctx);
   window.__view = registered['conversation.view'][0];
-  window.__headers = registered['conversation.session.header.actions'];
+  // 头部现在**应该是空的**（用户要求插件别碰标题那一排），所以这里不再假设有注册项
+  window.__headers = registered['conversation.session.header.actions'] || [];
   window.__inputRights = registered['conversation.input.right'] || [];
-  window.__header = window.__headers[window.__headers.length - 1]; // 最后一个 = 打开面板那个
+  window.__header = window.__headers[window.__headers.length - 1] ?? null;
   window.__specs = specs;
   window.__specsOf = (name) => specs[name] || [];
   // 照核心的真实契约组 props：conversation.view 的注册项 inject 会收到会话 id
@@ -391,6 +392,16 @@ window.__mountReal = (sessionId, options) => {
   return true;
 };
 
+// 点标签条上的某个 tab（真的 tab 按钮，不再是我们造的入口）
+window.__clickTab = (label) => {
+  const t = [...document.querySelectorAll('[role="tablist"] [role="tab"]')].find(
+    (x) => (x.textContent || '').trim() === label,
+  );
+  if (!t) return false;
+  t.click();
+  return true;
+};
+
 // 按文字找按钮并点（开关按钮的文字会随状态变）
 window.__clickText = (text) => {
   const btn = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').trim().includes(text));
@@ -421,21 +432,16 @@ const viewMeta = await page.evaluate(() => {
 check('视图注册项 id/顺序/文案对', viewMeta.id === 'semantica-graph' && viewMeta.order === 30 && viewMeta.label === '知识图谱', JSON.stringify(viewMeta))
 check('视图注册项声明了 inject（核心不会把 sessionId 传成 props）', viewMeta.hasInject === true)
 
-const headerMeta = await page.evaluate(() => ((window.__specsOf || (() => []))('conversation.session.header.actions') || []).map((m) => ({ id: m.id, inject: typeof m.inject === 'function' })))
+// 用户要求：「上面 header 的按钮都去掉吧……插件只需要 tab 和 input 的开关」。
+// 所以这条断言的是**一个都没注册** —— 插件不碰核心的标题那一排。
+const headerMeta = await page.evaluate(() =>
+	((window.__specsOf || (() => []))('conversation.session.header.actions') || []).map((m) => m.id),
+)
 const inputRightMeta = await page.evaluate(() =>
 	((window.__specsOf || (() => []))('conversation.input.right') || []).map((m) => ({ id: m.id, inject: typeof m.inject === 'function' })),
 )
-check(
-	'输入框那一排注册了「每轮提取」开关（用户要的位置）',
-	inputRightMeta.length === 1 && inputRightMeta[0].id === 'semantica-auto-input' && inputRightMeta[0].inject === true,
-	JSON.stringify(inputRightMeta),
-)
-check(
-	'头部注册了两个按钮：每轮提取开关 + 打开面板',
-	headerMeta.length === 2 && headerMeta.every((m) => m.inject === true) && headerMeta.some((m) => m.id === 'semantica-auto'),
-	JSON.stringify(headerMeta),
-)
-check('头部按钮也注册了', await page.evaluate(() => Boolean(window.__header)))
+check('会话标题那一排：插件一个按钮都不注册（用户要求）', headerMeta.length === 0, JSON.stringify(headerMeta))
+check('头部没有任何插件按钮可渲染（注册数 0）', (await page.evaluate(() => (window.__headers || []).length)) === 0)
 
 await page.waitForTimeout(400)
 
@@ -630,9 +636,7 @@ const probeToggles = () =>
 				? 'panel'
 				: b.closest('[data-composer-seat]')
 					? 'composer'
-					: b.closest('[data-semgp-root]')
-						? 'inside-panel?'
-						: 'header',
+					: 'unknown',
 			state: b.getAttribute('data-semgp-auto'),
 			pressed: b.getAttribute('aria-pressed'),
 			compact: b.hasAttribute('data-semgp-compact'),
@@ -643,11 +647,11 @@ const probeToggles = () =>
 
 const autoBefore = (await probeToggles()).items
 check(
-	'聊天标签下有两处入口：输入框那一排 + 标题右侧，默认都是「关」',
-	autoBefore.length === 2 &&
-		autoBefore.every((b) => b.state === 'off' && b.pressed === 'false') &&
-		['composer', 'header'].every((w) => autoBefore.some((b) => b.where === w)),
-	JSON.stringify(autoBefore),
+	'聊天标签下只有**输入框那一排**一处开关（头部已经没有了），默认「关」',
+	autoBefore.length === 1 &&
+		autoBefore[0].where === 'composer' &&
+		autoBefore[0].state === 'off' &&
+		autoBefore[0].pressed === 'false',
 )
 {
 	const composerBtn = autoBefore.find((b) => b.where === 'composer')
@@ -663,7 +667,13 @@ check(
 	const extra = report?.diag?.extra
 	check(
 		'输入框那个开关自报了真几何（在 composer seat 里、可见）',
-		Boolean(extra) && extra.visible === true && extra.inComposerSeat === true && extra.rect[3] >= 20,
+		Boolean(extra) &&
+		extra.visible === true &&
+		extra.inComposerSeat === true &&
+		extra.rect[3] >= 20 &&
+		// 头部一处残留都没有（用户要求）
+		Array.isArray(extra.strayButtons) &&
+		extra.strayButtons.length === 0,
 		JSON.stringify(extra ?? null),
 	)
 }
@@ -680,9 +690,9 @@ check(
 	JSON.stringify(autoBodies[0] ?? null),
 )
 check(
-	'标题右侧那处入口跟着一起变「开」（同一个开关）',
-	autoAfter.filter((b) => b.text.includes('开')).length === 2,
-	JSON.stringify(autoAfter.map((b) => b.text)),
+	'点开之后没有冒出别处的按钮（插件只有 tab + 输入框开关这两个面）',
+	autoAfter.length === 1 && autoAfter[0].where === 'composer',
+	JSON.stringify(autoAfter.map((b) => [b.where, b.text])),
 )
 
 // 切到知识图谱标签：面板这时才挂载（核心只渲染激活的视图），它读的是同一个状态
@@ -909,15 +919,17 @@ check('面板铺满视图区', Math.abs(real.rootRect.h - real.viewArea.h) <= 2,
 check('iframe 宿主跟着画布，不再是 0×0', real.hostHost.w >= 200 && real.hostHost.h >= 200, JSON.stringify(real.hostHost))
 check('图谱标签下输入框被藏住（不然还能操作背后的对话）', real.hideAttr === true && real.seatDisplay === 'none', JSON.stringify({ hideAttr: real.hideAttr, seatDisplay: real.seatDisplay }))
 
-// 头部入口按钮 → 切标签（走的是真 activateViewTab：按 tab 文字匹配）
-const clicked = await page.evaluate(() => window.__clickHeaderButton())
-await page.waitForTimeout(150)
+// 打开面板的唯一入口现在是**标签本身**（头部按钮已按用户要求去掉）
+const clicked = await page.evaluate(() => window.__clickTab('知识图谱'))
+await page.waitForTimeout(500)
 const tabState = await page.evaluate(() =>
 	[...document.querySelectorAll('[role="tab"]')].map((t) => ({ text: t.textContent, selected: t.getAttribute('aria-selected') })),
 )
 check(
-	'点头部按钮能切到图谱标签',
-	clicked === true && tabState.some((t) => t.text === '知识图谱' && t.selected === 'true'),
+	'点「知识图谱」标签能切过去，并且面板挂载出来',
+	clicked === true &&
+		tabState.some((t) => t.text === '知识图谱' && t.selected === 'true') &&
+		(await page.evaluate(() => Boolean(document.querySelector('[data-semgp-root]')))),
 	JSON.stringify(tabState),
 )
 
