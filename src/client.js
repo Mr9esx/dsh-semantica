@@ -604,8 +604,14 @@ window.__ModuleLoader__.load({
 		// 时候当兜底；真正生效的上限是 window.innerWidth。
 		const PANEL_FLOOR = 280;
 		const PANEL_NARROW = 768;
-		/** 我们想要的宽度：够 Explorer 铺开，又不至于把对话区挤没。 */
-		const PANEL_COMFORT = 600;
+		/**
+		 * 我们想要的宽度：够 Explorer 铺开，又不至于把对话区挤没。
+		 *
+		 * 640 不是拍脑袋来的，是实测的临界值：路径 chip 宽约 359px，只有面板到 640px
+		 * 它才能和四个统计数字挤在同一行。600px 差 40px 落在换行那一侧 —— chip 一换行，
+		 * 工具栏从 68px 涨到 94px，图区白白少 26px。代价是对话区从 780px 减到 740px。
+		 */
+		const PANEL_COMFORT = 640;
 
 		/**
 		 * 目标宽度；窄到进抽屉模式时返回 null（那种情况面板铺满窗口，

@@ -119,7 +119,7 @@ console.log(`截图目录: ${OUT}\n`)
 // 插件会在图谱面板展开时把它拉到 600px（只加宽，不回缩）。
 const SEED_WIDTH_NARROW = 483
 const SEED_WIDTH_WIDE = 700
-const EXPANDED_WIDTH = 600
+const EXPANDED_WIDTH = 640
 
 const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
 	page.evaluate(
