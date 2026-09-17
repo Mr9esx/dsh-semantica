@@ -54,6 +54,7 @@ window.__ModuleLoader__.load({
 			"action.refresh": "刷新",
 			"action.analysis": "分析",
 			"action.external": "在浏览器打开",
+			"path.hint": "点击复制这个文件的完整路径",
 			"action.copy": "复制提取指令",
 			"action.copied": "已复制",
 			"mode.conversation": "本对话",
@@ -70,9 +71,9 @@ window.__ModuleLoader__.load({
 			"auto.off": "每轮提取：关",
 			"auto.compactOff": "图谱提取 关",
 			"auto.compactOn": "图谱提取 开",
-			"auto.defaultOff": "新会话默认：关",
-			"auto.defaultOn": "新会话默认：开",
-			"auto.defaultHint": "新建的对话在发出第一条消息之前还没有会话，那时候任何按会话的开关都点不到 —— 所以「每条新对话一开始就自动提取」要靠这个默认值。点一下切换。",
+			"auto.defaultOff": "新对话默认：关",
+			"auto.defaultOn": "新对话默认：开",
+			"auto.defaultHint": "以后**新开**的对话，一开始是自动提取还是不开。\n为什么要单独一个：新建对话在发出第一条消息之前还没有会话，那时连「每轮提取」这个开关都还没渲染出来，点不到 —— 想让新对话从第一条消息就开始提取，只能提前把这里设成开。\n已经在聊的对话不受影响（它们看各自的开关）。",
 			"auto.on": "每轮提取：开",
 			"auto.offHint": "关着的时候，模型只在它觉得值得记的时候写图。点一下改成「每轮都写」。",
 			"auto.onHint": "开着的时候，模型每一轮回复结束前都要把这一轮的新知识写进图（会多花一些 token）。点一下关掉。",
@@ -119,6 +120,7 @@ window.__ModuleLoader__.load({
 			"action.refresh": "Refresh",
 			"action.analysis": "Analysis",
 			"action.external": "Open in browser",
+			"path.hint": "Click to copy this file's full path",
 			"action.copy": "Copy extract prompt",
 			"action.copied": "Copied",
 			"mode.conversation": "This chat",
@@ -137,7 +139,7 @@ window.__ModuleLoader__.load({
 			"auto.compactOn": "Graph extract: on",
 			"auto.defaultOff": "New chats default: off",
 			"auto.defaultOn": "New chats default: on",
-			"auto.defaultHint": "A brand-new chat has no session until the first message, so no per-session switch can be clicked yet — use this default to make every new chat extract from the start. Click to toggle.",
+			"auto.defaultHint": "Whether a **newly started** chat extracts every turn from the beginning.\nWhy it is separate: a brand-new chat has no session until the first message, so even the per-turn switch is not rendered yet — set this to on to have new chats extract from their very first message.\nChats already in progress are unaffected.",
 			"auto.on": "Per-turn extract: on",
 			"auto.offHint": "When off, the model only writes when it judges something worth keeping. Click to write every turn.",
 			"auto.onHint": "When on, the model must write this turn's new knowledge before finishing (costs extra tokens). Click to turn off.",
@@ -195,10 +197,18 @@ window.__ModuleLoader__.load({
 		// 统计数字与它后面的单位同号（只有字重不同），免得数字和单位大小不一。
 		// 等宽只给路径那一处 —— 路径要能一眼看出层级。
 		const CSS = `
-[data-semgp-root]{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12px}
-[data-semgp-bar]{display:flex;align-items:center;flex-wrap:wrap;gap:8px;box-sizing:border-box;min-height:34px;padding:8px 12px;border-bottom:1px solid rgba(128,128,128,.22)}
-[data-semgp-sub]{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 12px;border-bottom:1px solid rgba(128,128,128,.14);color:rgba(128,128,128,.95)}
+/* 面板的 content padding：整个面板内容离边框 16px（用户要求）。
+   box-sizing 必须在，否则 100% 高度会再撑出 32px。*/
+[data-semgp-root]{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12px;box-sizing:border-box;padding:16px;gap:12px}
+/* 工具栏：一条卡片（边框 + 8px 圆角），不再是「贴着顶边的一条分隔线」。
+   背景保持透明 —— 免得在深浅两套主题下自己猜底色猜错。*/
+[data-semgp-bar]{display:flex;align-items:center;flex-wrap:wrap;gap:8px;box-sizing:border-box;min-height:34px;padding:8px 12px;border:1px solid rgba(128,128,128,.28);border-radius:8px;background:transparent}
+/* 副行：工具栏下面那行浅色补充说明。已经不需要分隔线了 —— 工具栏本身是卡片，
+   间距由 root 的 gap 负责（用户问「为什么这玩意要单独一行」，路径已经搬进工具栏）。*/
+[data-semgp-sub]{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:0 2px;color:rgba(128,128,128,.95)}
 [data-semgp-spacer]{flex:1 1 auto}
+/* 工具栏里的小竖线：把「看哪个图 / 写图的开关 / 操作」三组分开，比纯空格子清楚 */
+[data-semgp-div]{width:1px;height:16px;background:rgba(128,128,128,.32);flex:none}
 [data-semgp-seg]{display:inline-flex;border:1px solid rgba(128,128,128,.35);border-radius:7px;overflow:hidden}
 [data-semgp-seg] button{font-size:12px;line-height:18px;padding:2px 10px;border:0;background:transparent;color:inherit;cursor:pointer}
 [data-semgp-seg] button[aria-pressed="true"]{background:rgba(128,128,128,.22);font-weight:600}
@@ -213,21 +223,23 @@ window.__ModuleLoader__.load({
 /* 输入框那一排是「compact controls」，所以那里用短文案 + 更小的内边距，别把行撑开 */
 [data-semgp-compact]{padding:2px 8px;line-height:20px;border-radius:6px}
 [data-semgp-btn][disabled]{opacity:.5;cursor:default}
-[data-semgp-path]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52ch}
-[data-semgp-body]{position:relative;flex:1 1 auto;min-height:0;display:flex}
+/* 路径按钮：等宽、单行、超长省略（完整路径在 title 里，点一下复制），鼠标给 copy 光标 */
+[data-semgp-path]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;opacity:.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34ch;cursor:copy}
+[data-semgp-body]{position:relative;flex:1 1 auto;min-height:0;display:flex;gap:12px}
 /* min-height 是保命的：这根画布的高度原本全靠 height:100% 一路传下来，只要任一层祖先
    给不出确定高度（.viewArea 是 flex:1 0 auto; min-height:auto，属于会变的那种），
    画布就会塌成 0，图直接看不见。给个下限，链子断了也只是矮一点。*/
 [data-semgp-canvas]{position:relative;flex:1 1 auto;min-width:0;min-height:280px}
 [data-semgp-holder]{position:absolute;inset:0}
-[data-semgp-center]{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center;color:rgba(128,128,128,.95);overflow:auto}
+[data-semgp-center]{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center;color:rgba(128,128,128,.95);overflow:auto;box-sizing:border-box;border:1px solid rgba(128,128,128,.28);border-radius:8px}
 [data-semgp-center] strong{font-size:13px;color:inherit}
 [data-semgp-center] p{margin:0;max-width:60ch;line-height:1.7}
 [data-semgp-center] pre{margin:0;max-width:64ch;text-align:left;font-size:12px;line-height:1.6;padding:10px 12px;border:1px solid rgba(128,128,128,.28);border-radius:8px;background:rgba(128,128,128,.08);white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
-[data-semgp-warn]{padding:6px 12px;border-bottom:1px solid rgba(128,128,128,.14);color:#c98a00}
+/* 警告条：同样按卡片做（它和工具栏、画布是同一层的块） */
+[data-semgp-warn]{padding:8px 12px;box-sizing:border-box;border:1px solid rgba(201,138,0,.45);border-radius:8px;background:rgba(201,138,0,.08);color:#c98a00}
 [data-semgp-spin]{width:18px;height:18px;border:2px solid rgba(128,128,128,.35);border-top-color:rgba(128,128,128,.9);border-radius:50%;animation:semgp-spin 900ms linear infinite}
 @keyframes semgp-spin{to{transform:rotate(360deg)}}
-[data-semgp-drawer]{width:380px;flex:0 0 380px;border-left:1px solid rgba(128,128,128,.22);display:flex;flex-direction:column;min-height:0}
+[data-semgp-drawer]{width:380px;flex:0 0 380px;display:flex;flex-direction:column;min-height:0;box-sizing:border-box;border:1px solid rgba(128,128,128,.28);border-radius:8px;overflow:hidden}
 [data-semgp-drawer] header{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(128,128,128,.14)}
 [data-semgp-drawer] header strong{font-size:12px}
 [data-semgp-tabs]{display:flex;gap:6px;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid rgba(128,128,128,.14)}
@@ -249,7 +261,10 @@ window.__ModuleLoader__.load({
 [data-semgp-chartbar]{height:5px;border-radius:3px;background:rgba(128,128,128,.28)}
 [data-semgp-chart]{display:flex;flex-direction:column;gap:3px}
 [data-semgp-muted]{color:rgba(128,128,128,.95)}
-[data-semgp-frame-host]{position:fixed;z-index:5;padding:0;box-sizing:border-box;display:none;background:var(--dsw-alias-bg-base,transparent)}
+/* iframe 容器：和工具栏同一套卡片语言（边框 + 8px 圆角）。overflow:hidden 是必须的
+   —— 圆角要真的裁掉 iframe 的直角，不然四个角会露出白方块。
+   它是 position:fixed 且几何由脚本按画布矩形算，box-sizing:border-box 保证加边框不改尺寸。*/
+[data-semgp-frame-host]{position:fixed;z-index:5;padding:0;box-sizing:border-box;display:none;border:1px solid rgba(128,128,128,.28);border-radius:8px;overflow:hidden;background:var(--dsw-alias-bg-base,transparent)}
 [data-semgp-frame-host] iframe{width:100%;height:100%;border:0;display:block;background:var(--dsw-alias-bg-base,transparent)}
 [data-semgp-hide-composer] [data-composer-seat]{display:none}
 `;
@@ -867,6 +882,7 @@ window.__ModuleLoader__.load({
 			// 走「采用已有 iframe」那条路时没有出图响应，统计数字就从这里补。
 			const [fallbackStats, setFallbackStats] = useState(null);
 			const [copied, setCopied] = useState(false);
+			const [pathCopied, setPathCopied] = useState(false);
 
 			// 视图键要和 host 那边算的一致（`/view` 里同一个字符串），它决定「沿用已有
 			// iframe」还是「重新出图」。末尾的 `v<规则版本>` 是关键：切图规则一变，旧视图
@@ -1002,14 +1018,7 @@ window.__ModuleLoader__.load({
 			const copy = useCallback(async () => {
 				const text = (status && status.instruction) || "";
 				if (!text) return;
-				try {
-					await navigator.clipboard.writeText(text);
-					setCopied(true);
-					setTimeout(() => setCopied(false), 1600);
-				} catch {
-					// 剪贴板不可用（非安全上下文）时把文本留在下面那块 pre 里让用户自己选
-					setCopied(false);
-				}
+				setCopied(await copyText(text));
 			}, [status]);
 
 			const stats = (view && view.stats) || (analysis && analysis.stats) || (fallbackStats && fallbackStats.stats) || null;
@@ -1062,6 +1071,27 @@ window.__ModuleLoader__.load({
 						statItems.map(([key, value]) => h(Stat, { key, label: T(key), value: value === null ? "—" : value })),
 					),
 					h("span", { "data-semgp-spacer": "" }),
+					// 图文件路径：点一下复制。放在工具栏里（用户：「为什么这玩意要单独一行啊，
+					// 和工具栏放在一起」），长路径用省略号收住，title 里是全文。
+					kgPath
+						? h(
+								"button",
+								{
+									type: "button",
+									"data-semgp-btn": "",
+									"data-semgp-path": "",
+									title: `${T("path.hint")}\n${kgPath}`,
+									onClick: () => {
+										void copyText(kgPath).then((ok) => {
+											setPathCopied(ok);
+											setTimeout(() => setPathCopied(false), 1400);
+										});
+									},
+								},
+								pathCopied ? T("action.copied") : shortPath(kgPath),
+							)
+						: null,
+					h("span", { "data-semgp-div": "" }),
 					h(
 						"button",
 						{
@@ -1075,17 +1105,35 @@ window.__ModuleLoader__.load({
 						},
 						autoOn ? `● ${T("auto.on")}` : T("auto.off"),
 					),
+					// 「新对话默认」紧挨着「每轮提取」——它俩是一对，中间不插别的
+					h(
+						"button",
+						{
+							type: "button",
+							"data-semgp-btn": "",
+							"data-semgp-compact": "",
+							"data-semgp-default": auto.isDefault === true ? "on" : "off",
+							"aria-pressed": auto.isDefault === true ? "true" : "false",
+							title: T("auto.defaultHint"),
+							disabled: auto.busy || auto.isDefault === null,
+							onClick: auto.flipDefault,
+						},
+						auto.isDefault === true ? T("auto.defaultOn") : T("auto.defaultOff"),
+					),
+					h("span", { "data-semgp-div": "" }),
 					h(Btn, { onClick: () => open(true), disabled: busy }, T("action.refresh")),
 					h(Btn, { onClick: () => setDrawer((v) => !v) }, drawer ? T("analysis.close") : T("action.analysis")),
 					view && view.url ? h(Btn, { href: view.url }, T("action.external")) : null,
 					h(Btn, { onClick: copy, disabled: !instruction }, copied ? T("action.copied") : T("action.copy")),
 				),
 
-				// —— 路径与归属说明 ——
+				// —— 归属说明 ——
+				//
+				// 路径和「新对话默认」都搬进工具栏了（用户：「为什么这玩意要单独一行啊，
+				// 和工具栏放在一起」）。这行只剩「本对话这个图是怎么切出来的」这类补充信息。
 				h(
 					"div",
 					{ "data-semgp-sub": "" },
-					kgPath ? h("code", { "data-semgp-path": "", title: kgPath }, kgPath) : null,
 					claim
 						? h(
 								"span",
@@ -1100,20 +1148,6 @@ window.__ModuleLoader__.load({
 							)
 						: null,
 					view && view.ms ? h("span", { "data-semgp-muted": "" }, `${view.ms}ms`) : null,
-					// 「新会话默认」：新对话在第一条消息之前没有会话，那时点不到任何按会话的开关，
-					// 所以「以后每条新对话都自动提取」只能靠这个默认值 —— 放在这里点一次就够。
-					h(
-						"button",
-						{
-							type: "button",
-							"data-semgp-btn": "",
-							"data-semgp-compact": "",
-							title: T("auto.defaultHint"),
-							disabled: auto.busy || auto.isDefault === null,
-							onClick: auto.flipDefault,
-						},
-						auto.isDefault === true ? T("auto.defaultOn") : T("auto.defaultOff"),
-					),
 				),
 
 				mcpMissing ? h("div", { "data-semgp-warn": "" }, T("state.mcpMissing")) : null,
@@ -1231,7 +1265,54 @@ window.__ModuleLoader__.load({
 		 *
 		 * 这段知识现在没有调用方了 —— 头部那个「打开知识图谱」按钮已经按用户要求去掉，
 		 * 用户直接点标签就行。留在注释里，免得以后又要重新踩一遍。
-		 */		/** 开关变化时在窗口里广播的事件名（两处入口都在同一个窗口里）。 */
+		 */		/**
+		 * 路径太长，工具栏里放全路径会把别的按钮挤走，所以中间收掉一段。
+		 *
+		 * 显示形如 `…/dsh-desktop/harness/dsh-semantica-graph/kg.json`：保住尾部的文件名
+		 * 和倒数第二层目录（用户要认的就是这两个），前面用省略号。完整路径在 title 里，
+		 * 点一下还能复制 —— 所以这里只是「看得见」，不要求「看得全」。
+		 */
+		function shortPath(p) {
+			const parts = String(p || "").split("/").filter(Boolean);
+			if (parts.length <= 3) return p;
+			return "…/" + parts.slice(-3).join("/");
+		}
+
+		/**
+		 * 把一段文本写进剪贴板。返回是否成功。
+		 *
+		 * 两个坑：
+		 *   · `navigator.clipboard` 在**非安全上下文**下压根不存在（http 的远程页面就是），
+		 *     所以不能直接 `.writeText`，会 TypeError；
+		 *   · 写失败了用户得知道，不能静默——调用方拿返回值决定按钮上显不显示「已复制」。
+		 * 兜底用那个老办法：临时 textarea + execCommand("copy")。
+		 */
+		async function copyText(text) {
+			if (!text) return false;
+			try {
+				if (navigator.clipboard && navigator.clipboard.writeText) {
+					await navigator.clipboard.writeText(text);
+					return true;
+				}
+			} catch {
+				// 落到下面的兜底
+			}
+			try {
+				const ta = document.createElement("textarea");
+				ta.value = text;
+				ta.setAttribute("readonly", "");
+				ta.style.cssText = "position:fixed;left:-9999px;top:0;opacity:0";
+				document.body.appendChild(ta);
+				ta.select();
+				const ok = document.execCommand("copy");
+				document.body.removeChild(ta);
+				return ok;
+			} catch {
+				return false;
+			}
+		}
+
+		/** 开关变化时在窗口里广播的事件名（两处入口都在同一个窗口里）。 */
 		const AUTO_EVENT = "semgp-auto";
 
 		/**

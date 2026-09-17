@@ -228,6 +228,17 @@ window.__ModuleLoader__ = {
 })
 
 // 3) 插件本体（原样，未打包）
+// 剪贴板桩：navigator.clipboard 在 headless 里没权限，而且它是只读 getter（直接赋值
+// 不生效），所以 defineProperty 顶掉它，把写进来的内容记在 window.__copied。
+await page.addScriptTag({
+  content: `
+    window.__copied = null;
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: async (t) => { window.__copied = t; } },
+    });
+  `,
+})
 await page.addScriptTag({ content: clientSource })
 
 // 4) 造一个假 ctx，走真的 apply()，把注册到槽里的视图组件捞出来
@@ -708,26 +719,38 @@ check(
 
 // 「新会话默认」：新对话在第一条消息之前没有会话，那时点不到任何按会话的开关，
 // 只能提前把默认设好 —— 这是「第一次输入也能自动提取」的唯一办法。
-const defaultLabel = await page.evaluate(() => {
-	const b = [...document.querySelectorAll('[data-semgp-sub] button')].find((x) => (x.textContent || '').includes('新会话默认'));
-	return b ? (b.textContent || '').trim() : null;
+// 用户问过「新会话默认：关 是啥玩意？」—— 所以文案改成「新对话默认」，并且搬进工具栏
+// 挨着「每轮提取」，让它一眼看出是一对。
+const defaultInfo = await page.evaluate(() => {
+	const b = document.querySelector('[data-semgp-default]');
+	if (!b) return null;
+	return {
+		text: (b.textContent || '').trim(),
+		inBar: Boolean(b.closest('[data-semgp-bar]')),
+		inSub: Boolean(b.closest('[data-semgp-sub]')),
+		hint: b.getAttribute('title') || '',
+	};
 })
-check('面板里有「新会话默认」这个开关', defaultLabel === '新会话默认：关', String(defaultLabel))
-await page.evaluate(() => window.__clickText('新会话默认：关'))
+check(
+	'「新对话默认」开关在工具栏里（不再自占一行），文案说人话',
+	defaultInfo?.text === '新对话默认：关' && defaultInfo.inBar === true && defaultInfo.inSub === false,
+	JSON.stringify(defaultInfo),
+)
+check(
+	'它有解释自己是什么的 tooltip（用户问过「这是啥玩意」）',
+	(defaultInfo?.hint || '').includes('新对话') && (defaultInfo?.hint || '').includes('第一条消息'),
+	(defaultInfo?.hint || '').slice(0, 40),
+)
+await page.evaluate(() => document.querySelector('[data-semgp-default]').click())
 await page.waitForTimeout(300)
 const defaultAfter = {
-	label: await page.evaluate(() => {
-		const b = [...document.querySelectorAll('[data-semgp-sub] button')].find((x) =>
-			(x.textContent || '').includes('新会话默认'),
-		);
-		return b ? (b.textContent || '').trim() : null;
-	}),
+	label: await page.evaluate(() => (document.querySelector('[data-semgp-default]')?.textContent || '').trim()),
 	// requestLog 在 Node 侧，不能在 page.evaluate 里读（那边没有这个变量）
 	posted: requestLog.filter((r) => r.includes('/auto')).length,
 }
 check(
 	'点默认开关会写成 POST /auto {default:true}，并变成「开」',
-	defaultAfter.label === '新会话默认：开' && defaultAfter.posted === 2,
+	defaultAfter.label === '新对话默认：开' && defaultAfter.posted === 2,
 	JSON.stringify(defaultAfter),
 )
 check(
@@ -735,8 +758,151 @@ check(
 	autoBodies.length === 2 && autoBodies[1].default === true && autoBodies[1].sessionId === undefined,
 	JSON.stringify(autoBodies),
 )
-await page.evaluate(() => window.__clickText('新会话默认：开'))
+await page.evaluate(() => document.querySelector('[data-semgp-default]').click())
 await page.waitForTimeout(200)
+
+// ── 路径：点击复制，而且不许单独占一行 ──
+const pathInfo = await page.evaluate(() => {
+	const b = document.querySelector('[data-semgp-path]');
+	if (!b) return null;
+	const r = b.getBoundingClientRect();
+	return {
+		tag: b.tagName,
+		inBar: Boolean(b.closest('[data-semgp-bar]')),
+		inSub: Boolean(b.closest('[data-semgp-sub]')),
+		title: b.getAttribute('title') || '',
+		h: Math.round(r.height),
+		cursor: getComputedStyle(b).cursor,
+	};
+})
+check(
+	'图文件路径在工具栏里（不再单独一行），是个可点的按钮',
+	pathInfo?.tag === 'BUTTON' && pathInfo.inBar === true && pathInfo.inSub === false && pathInfo.h >= 18,
+	JSON.stringify(pathInfo),
+)
+check(
+	'路径按钮的 tooltip 里有完整路径和「点击复制」',
+	pathInfo.title.includes('/') && pathInfo.title.includes('复制'),
+	pathInfo.title,
+)
+check('路径按钮的鼠标光标是 copy（一眼看得出能复制）', pathInfo.cursor === 'copy', String(pathInfo.cursor))
+
+await page.evaluate(() => document.querySelector('[data-semgp-path]').click())
+await page.waitForTimeout(250)
+const copied = await page.evaluate(() => ({
+	text: window.__copied,
+	label: (document.querySelector('[data-semgp-path]')?.textContent || '').trim(),
+}))
+check(
+	'点路径真的把完整路径复制到剪贴板了',
+	typeof copied.text === 'string' && copied.text.endsWith('/kg.json') && copied.text.includes('dsh-semantica-graph'),
+	String(copied.text),
+)
+check('复制成功后按钮上出现「已复制」', copied.label === '已复制', copied.label)
+
+// ── 样式：工具栏 + iframe 都是卡片（边框 + 8px 圆角），面板内容 16px 内边距 ──
+const panelStyle = await page.evaluate(() => {
+	const cs = (el) => (el ? getComputedStyle(el) : null);
+	const root = cs(document.querySelector('[data-semgp-root]'));
+	const bar = cs(document.querySelector('[data-semgp-bar]'));
+	const host = cs(document.querySelector('[data-semgp-frame-host]'));
+	return {
+		rootPad: root?.padding,
+		barBorder: bar ? [bar.borderTopWidth, bar.borderTopStyle].join(' ') : null,
+		barRadius: bar?.borderRadius,
+		hostBorder: host ? [host.borderTopWidth, host.borderTopStyle].join(' ') : null,
+		hostRadius: host?.borderRadius,
+		hostOverflow: host?.overflow,
+	};
+})
+check('面板内容 padding 是 16px', panelStyle.rootPad === '16px', String(panelStyle.rootPad))
+
+// 布局体检：我看不了图（当前模型不吃图），所以把「难不难看」里能量化的都量掉 ——
+// 工具栏有没有挤成两行、子元素有没有溢出、内容有没有真的从 16px 内边距开始。
+const layout = await page.evaluate(() => {
+	const root = document.querySelector('[data-semgp-root]');
+	const bar = document.querySelector('[data-semgp-bar]');
+	const body = document.querySelector('[data-semgp-body]');
+	const canvas = document.querySelector('[data-semgp-canvas]');
+	const sub = document.querySelector('[data-semgp-sub]');
+	// 注意：DOMRect 跨 page.evaluate 传回来会变成 {}（属性在原型上，序列化丢光），
+	// 所以这里当场摊平成普通数字。
+	const r = (el) => {
+		if (!el) return null;
+		const b = el.getBoundingClientRect();
+		return { left: b.left, right: b.right, top: b.top, bottom: b.bottom, w: b.width, h: b.height };
+	};
+	const overflow = (el) => {
+		if (!el) return null;
+		const b = el.getBoundingClientRect();
+		let worst = 0;
+		for (const kid of el.children) {
+			const k = kid.getBoundingClientRect();
+			worst = Math.max(worst, k.right - b.right, k.bottom - b.bottom, b.left - k.left);
+		}
+		return Math.round(worst);
+	};
+	return {
+		rootRect: r(root),
+		barRect: r(bar),
+		barOverflow: overflow(bar),
+		barKids: bar ? bar.children.length : 0,
+		subOverflow: overflow(sub),
+		bodyTop: r(body)?.top ?? null,
+		barBottom: r(bar)?.bottom ?? null,
+		canvasH: Math.round(r(canvas)?.h ?? 0),
+		canvasRight: Math.round(r(canvas)?.right ?? 0),
+		rootRight: Math.round(r(root)?.right ?? 0),
+	};
+})
+check(
+	'工具栏在 1380px 宽度下排得下（一行，没挤成两行）',
+	layout.barRect.h <= 44,
+	JSON.stringify({ h: layout.barRect.h, kids: layout.barKids }),
+)
+check(
+	'工具栏里的子元素没有溢出它的盒子',
+	layout.barOverflow !== null && layout.barOverflow <= 1,
+	String(layout.barOverflow),
+)
+check(
+	'主体紧跟在工具栏下面，没有叠在一起',
+	layout.bodyTop !== null && layout.barBottom !== null && layout.bodyTop >= layout.barBottom,
+	JSON.stringify({ barBottom: Math.round(layout.barBottom), bodyTop: Math.round(layout.bodyTop) }),
+)
+check(
+	'内容确实从 16px 内边距里开始、右边也留出 16px',
+	Math.abs(layout.barRect.left - (layout.rootRect.left + 16)) <= 1 &&
+		Math.abs(layout.rootRight - layout.canvasRight - 16) <= 1,
+	JSON.stringify({ barLeft: Math.round(layout.barRect.left), rootLeft: Math.round(layout.rootRect.left), gapRight: Math.round(layout.rootRight - layout.canvasRight) }),
+)
+
+// 分组顺序：图 [模式 统计] → 路径 ┊ 写图开关 [每轮提取 新对话默认] ┊ 操作
+const barOrder = await page.evaluate(() =>
+	[...document.querySelector('[data-semgp-bar]').children].map((el) => {
+		for (const k of ['path', 'auto', 'default', 'div', 'seg', 'stats', 'spacer']) {
+			if (el.hasAttribute('data-semgp-' + k)) return k;
+		}
+		return (el.textContent || '').trim();
+	}),
+)
+check(
+	'工具栏按「图 → 路径 ┊ 开关 ┊ 操作」分三组，默认开关紧挨着每轮提取',
+	barOrder.join(' ').includes('path div auto default div'),
+	JSON.stringify(barOrder),
+)
+check(
+	'工具栏带 1px 边框 + 8px 圆角',
+	panelStyle.barBorder === '1px solid' && panelStyle.barRadius === '8px',
+	JSON.stringify({ border: panelStyle.barBorder, radius: panelStyle.barRadius }),
+)
+check(
+	'iframe 容器也是 1px 边框 + 8px 圆角，而且 overflow:hidden 把直角裁掉',
+	panelStyle.hostBorder === '1px solid' &&
+		panelStyle.hostRadius === '8px' &&
+		panelStyle.hostOverflow === 'hidden',
+	JSON.stringify(panelStyle),
+)
 
 // 关回去，别影响后面的用例
 await page.evaluate(() => window.__clickText('每轮提取：开'))
@@ -966,6 +1132,15 @@ check('祖先给不出高度时画布仍有下限高度（保命，不是靠运�
 // ── 页面级错误 ──
 
 check('整轮没有 JS 报错', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | '))
+
+if (process.env.SEMGP_SHOT) {
+	// 截一张真图看样式 —— 断言能量尺寸和颜色，量不出「难不难看」
+	await page.evaluate(() => window.__setActiveView('semantica-graph'))
+	await page.waitForTimeout(1200)
+	const shot = await page.$('[data-semgp-root]')
+	if (shot) await shot.screenshot({ path: process.env.SEMGP_SHOT })
+	console.log('截图已存：' + process.env.SEMGP_SHOT)
+}
 
 await browser.close()
 shell.close()
