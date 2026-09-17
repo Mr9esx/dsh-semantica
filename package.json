@@ -1,14 +1,14 @@
 {
   "name": "dsh-semantica-graph",
-  "version": "0.11.0",
-  "description": "DSH 插件：用 Semantica 把当前对话构建成知识图谱，在侧边栏内嵌其自带的 Knowledge Explorer 浏览，并可开新对话让 AI 分析",
+  "version": "1.0.0",
+  "description": "DSH 插件：模型用 MCP 把当前对话写进 Semantica 知识图谱，面板内嵌上游 Knowledge Explorer 展示，并用插件自带的原生分析视图做分析",
   "keywords": [
     "deepseek-harness",
     "dsh",
     "dsh-plugin",
     "semantica",
     "knowledge-graph",
-    "context-graph",
+    "mcp",
     "explorer"
   ],
   "type": "module",
@@ -22,7 +22,6 @@
   "files": [
     "src",
     "scripts",
-    "docs",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -40,15 +39,13 @@
     }
   },
   "scripts": {
-    "check": "node --check src/index.js && node --check src/client.js && node --check src/analyze.js && node scripts/check-inject.mjs",
-    "check:endpoints": "node scripts/check-endpoints.mjs",
-    "visual": "node scripts/visual-check.mjs"
+    "check": "node --check src/index.js && node --check src/client.js && node --check src/kg.js && node --check src/explorer.js && node --check src/prompt.js && node --check src/session.js",
+    "selftest": "node scripts/selftest.mjs",
+    "visual": "node scripts/visual-check.mjs",
+    "install": "node scripts/install.mjs"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"
   },
-  "license": "MIT",
-  "dependencies": {
-    "fzstd": "^0.1.1"
-  }
+  "license": "MIT"
 }

@@ -3,23 +3,19 @@
 // dsh-semantica-graph 的浏览器半侧。
 //
 // 两个贡献点，都注册在**核心包**的槽上，因此不依赖任何第三方插件：
-//   1. conversation.view —— 对话顶部那一排标签里的「知识图谱」
-//      （与「对话 / 轨迹 / 上下文」并列；那个槽由 dsh-client-ui-conversation 提供）
+//   1. conversation.view —— 对话顶部标签里的「知识图谱」
 //   2. conversation.session.header.actions —— 会话标题右侧的入口按钮，点了切到上面那个标签
 //
-// 图的界面**不在这里**。它由 semantica 自带的 Knowledge Explorer 提供，
-// 本插件只负责把它拉起来、然后内嵌进面板。
-// 这样功能上限就等于上游（6 个 workspace、78 个 /api 路由），而不是自绘一个子集。
+// ## 界面分三块，来源各不相同
 //
-// 内嵌走的是插件自己渲染的 iframe（ExplorerFrame），而不是 better-sidebar 的
-// 'browser' 标签 —— 后者壳里有一条删不掉的状态行。详见 EXPLORER_IFRAME_SANDBOX。
+//   · 图本身   —— semantica 的 Knowledge Explorer（上游完整的 Web 应用），内嵌 iframe。
+//                 插件不自己画图：Explorer 有多个 workspace、几十个 /api 路由，自绘只能
+//                 覆盖其中一个视图，功能上限会掉一大截。
+//   · 工具栏   —— 本插件自己画：统计数字、本对话/全部切换、刷新、分析、复制提取指令。
+//   · 分析抽屉 —— 本插件自己画，数据来自 /api-semantica/analysis，指标在插件里算
+//                 （src/kg.js），不调 AI、不开新对话。
 //
-// 曾经面板是 better-sidebar 的一个 tab。搬到这里的原因见设计文档 §6.6：
-// 没有 better-sidebar 时插件**能装上、宿主照跑，但界面一个入口都没有**，
-// 而头部按钮还会照常显示、点下去静默无反应。
-//
-// 因此客户端只依赖 react（在基座冻结表里），不需要内联任何第三方库，
-// 也就不需要构建步骤 —— 这个文件就是实际加载的产物。
+// 客户端只依赖 react（基座冻结表里有），不需要构建步骤 —— 这个文件就是加载的产物。
 
 window.__ModuleLoader__.load({
 	id: "dsh-semantica-graph",
@@ -32,975 +28,223 @@ window.__ModuleLoader__.load({
 		const h = react.createElement;
 		const { useState, useEffect, useRef, useCallback } = react;
 
-		/** 控制面板的 tab 类型。 */
+		/** 语言包命名空间 / 视图 id。 */
 		const NS = "semantica-graph";
 
 		/**
 		 * 内嵌 Explorer 用的 iframe sandbox。
 		 *
-		 * 为什么不用 better-sidebar 的 browser tab（它的壳里有一条删不掉的
-		 * 「沙箱模式：已启用」状态行 —— SandboxStatusBar 是无条件渲染的，
-		 * 且没有任何隐藏设置；关掉沙箱只是把绿杠换成红杠）：
-		 * 自己渲染 iframe 就没有那层壳，也不再需要用户去配
-		 * browserAllowedLoopback 允许清单。
-		 *
-		 * 这一串就是 better-sidebar 给「已放行的回环地址」用的那串，逐字相同：
-		 *   - allow-same-origin 必须有：没有它 iframe 是 opaque origin，
-		 *     Explorer 这种 React SPA 的模块脚本与 fetch 会跑不起来（实测白屏：
-		 *     非白像素 0.1%，而带它时是 100%）。
-		 *   - 刻意**不含** allow-top-navigation：页面因此无法把主窗口导航走。
-		 *   - 也不含 allow-popups-to-escape-sandbox 之外的放宽项。
-		 *
-		 * 安全性说明：Explorer 跑在 127.0.0.1:<另一个端口>，与 GUI 端口不同，
-		 * 所以它**仍是跨源**的 —— 拿不到 GUI 的 DOM、Cookie 与内部接口。
-		 * 不配允许清单不代表没有隔离。
+		 * 这一串是「放行的回环地址」那一档，逐字沿用既有实现（实测过的组合）：
+		 *   · allow-same-origin **必须有**：没有它 iframe 是 opaque origin，
+		 *     Explorer 这种 React SPA 的模块脚本与 fetch 跑不起来（实测白屏）。
+		 *   · 刻意**不含** allow-top-navigation：Explorer 因此无法把主窗口导航走。
+		 *   · 安全性：Explorer 在 127.0.0.1 的另一个端口上，仍是跨源 —— 拿不到 GUI 的
+		 *     DOM、Cookie 与内部接口。
 		 */
 		const EXPLORER_IFRAME_SANDBOX =
 			"allow-scripts allow-forms allow-popups allow-downloads allow-modals allow-popups-to-escape-sandbox allow-same-origin";
 
-		// ───────────────────────────── 文案 ─────────────────────────────
+		// ───────────────────────────── 语言包 ─────────────────────────────
 
 		const zh = {
-			"action.title": "对话知识图谱",
-			"action.label": "知识图谱",
-			"action.aria": "用 Semantica 查看当前对话的知识图谱",
 			"tab.title": "知识图谱",
-			"state.working": "正在用 Semantica 抽取实体与关系…",
-			"state.workingHint": "首次运行要加载模型，大约十几秒到半分钟。",
-			"state.empty": "这个对话还没有可抽取的内容。",
-			"error.title": "无法生成图谱",
-			"error.retry": "重试",
-			"error.detail": "详情",
-			"action.refresh": "重新抽取",
+			"action.open": "打开知识图谱",
+			"action.refresh": "刷新",
+			"action.analysis": "分析",
+			"action.external": "在浏览器打开",
+			"action.copy": "复制提取指令",
+			"action.copied": "已复制",
+			"mode.conversation": "本对话",
+			"mode.all": "全部",
 			"stat.nodes": "节点",
 			"stat.edges": "边",
 			"stat.entities": "实体",
 			"stat.relations": "关系",
-			"stat.took": "耗时",
-			"engine.label": "引擎",
-			"note.stale": "会话此后又有新内容，这张图是旧的。",
-			"note.staleShort": "图已过期",
-			"path.tip": "点击复制完整路径（这张图落盘的 JSON 文件）",
-			"path.copied": "已复制",
-			"path.failed": "复制失败，请手动选中",
-			"action.dismiss": "关掉这条提示",
-			"state.emptyHint": "还没有图。点「重新抽取」开始。",
-			"action.external": "在浏览器打开",
-			"state.loading": "正在载入 Explorer…",
-						"note.api": "Explorer 的 REST API",
-			"note.explorer": "上游 Explorer",
-			// 四个按钮只有 title 提示，所以「会新开一个对话」这件事必须写进 tooltip，
-			// 否则用户点下去才发现跳到别处了。
-			"analyze.tip": "会新开一个对话，先把这张图的数据注入进去，再让 AI 分析。",
-			"analyze.retro": "复盘这次对话",
-			"analyze.structure": "理解图数据",
-			"analyze.quality": "检验抽取质量",
-			"analyze.advice": "给当前任务的建议",
-			"analyze.working": "正在开新对话…",
-			"analyze.done": "已开新对话：",
-			"analyze.manual": "没能自动切过去，去会话列表里找它就行。",
-			"analyze.noDigest": "图数据没能注入，这个对话只有提问。",
-			"analyze.noDrill": "图服务没起来，这次只能基于静态摘要分析。",
-			"analyze.needPrepare": "请先点「重新抽取」把图建出来。",
+			"stat.decisions": "决策",
+			"state.loading": "正在打开图…",
+			"state.emptyHint": "还没有可显示的内容",
+			"state.noKg": "这台机器上还没有写过任何知识图谱",
+			"state.noKgHint": "图由模型通过 mcp__semantica__ 工具写入。把下面这段指令粘进对话，让它把这次对话抽进去：",
+			"state.noNodes": "本对话在图里还没有节点",
+			"state.noNodesHint": "图里有别的会话写入的内容。点「复制提取指令」让模型把这次对话也写进去，或者切到「全部」看整张图。",
+			"state.taggedOnly": "本对话 {n} 个节点",
+			"state.claimByEntity": "按实体边认领 {n} 条决策",
+			"state.claimByTime": "按时间认领 {n} 条决策",
+			"state.untaggedNote": "图里还有 {n} 个节点没打会话标，只出现在「全部」里",
+			"state.explorerMissing": "Explorer 依赖不可用",
+			"state.mcpMissing": "MCP 工具没挂上：profile 里看不到 mcp-semantica 条目，模型写不进图。",
+			"analysis.title": "分析",
+			"analysis.close": "收起",
+			"analysis.overview": "概览",
+			"analysis.hubs": "枢纽",
+			"analysis.communities": "社区",
+			"analysis.decisions": "决策",
+			"analysis.timeline": "时间线",
+			"analysis.byDegree": "按度数",
+			"analysis.byRank": "按 PageRank",
+			"analysis.noDecisions": "这张图里还没有决策",
+			"analysis.maker": "决策人",
+			"analysis.confidence": "置信度",
+			"analysis.members": "成员",
+			"analysis.byType": "节点类型",
+			"analysis.isolated": "孤立节点",
+			"analysis.components": "连通分量",
+			"analysis.untaggedNote": "图里还有 {n} 个节点没打会话标，只出现在「全部」里",
+			"analysis.failed": "分析失败",
 		};
 
 		const en = {
-			"action.title": "Conversation knowledge graph",
-			"action.label": "Knowledge graph",
-			"action.aria": "Explore this conversation's knowledge graph with Semantica",
 			"tab.title": "Knowledge graph",
-			"state.working": "Extracting entities and relations with Semantica…",
-			"state.workingHint": "The first run loads the models; expect up to half a minute.",
-			"state.empty": "Nothing extractable in this conversation yet.",
-			"error.title": "Could not build the graph",
-			"error.retry": "Retry",
-			"error.detail": "Details",
-			"action.refresh": "Re-extract",
-			"stat.nodes": "Nodes",
-			"stat.edges": "Edges",
-			"stat.entities": "Entities",
-			"stat.relations": "Relations",
-			"stat.took": "Took",
-			"engine.label": "Engine",
-			"note.stale": "The conversation has grown since; this graph is stale.",
-			"note.staleShort": "Stale",
-			"path.tip": "Click to copy the full path of the graph file on disk",
-			"path.copied": "Copied",
-			"path.failed": "Copy failed — select it manually",
-			"action.dismiss": "Dismiss this notice",
-			"state.emptyHint": "No graph yet — press “Re-extract” on the right to build one.",
+			"action.open": "Open knowledge graph",
+			"action.refresh": "Refresh",
+			"action.analysis": "Analysis",
 			"action.external": "Open in browser",
-			"state.loading": "Loading the Explorer…",
-			"note.api": "Explorer REST API",
-			"note.explorer": "Upstream Explorer",
-			"analyze.tip": "Opens a new conversation, seeds it with this graph, then asks the AI to analyse it.",
-			"analyze.retro": "Review this conversation",
-			"analyze.structure": "Understand the graph",
-			"analyze.quality": "Check extraction quality",
-			"analyze.advice": "Advise on my current task",
-			"analyze.working": "Opening a new conversation…",
-			"analyze.done": "New conversation created:",
-			"analyze.manual": "Could not switch to it automatically — find it in the session list.",
-			"analyze.noDigest": "The graph data could not be injected; this conversation has only the question.",
-			"analyze.noDrill": "The graph service is not running, so this run is summary-only.",
-			"analyze.needPrepare": "Press “Re-extract” first to build the graph.",
+			"action.copy": "Copy extract prompt",
+			"action.copied": "Copied",
+			"mode.conversation": "This chat",
+			"mode.all": "All",
+			"stat.nodes": "nodes",
+			"stat.edges": "edges",
+			"stat.entities": "entities",
+			"stat.relations": "relations",
+			"stat.decisions": "decisions",
+			"state.loading": "Opening graph…",
+			"state.emptyHint": "Nothing to show yet",
+			"state.noKg": "No knowledge graph has been written on this machine yet",
+			"state.noKgHint":
+				"The graph is written by the model through the mcp__semantica__ tools. Paste this prompt into the chat:",
+			"state.noNodes": "This chat has no nodes in the graph yet",
+			"state.noNodesHint":
+				"The graph holds other chats' content. Use “Copy extract prompt” to have the model write this one, or switch to “All”.",
+			"state.taggedOnly": "{n} nodes in this chat",
+			"state.claimByEntity": "{n} decisions claimed by entity edges",
+			"state.claimByTime": "{n} decisions claimed by time",
+			"state.untaggedNote": "{n} nodes carry no conversation tag (visible under “All”)",
+			"state.explorerMissing": "Explorer dependencies unavailable",
+			"state.mcpMissing": "MCP tools are not attached: no mcp-semantica row in the profile.",
+			"analysis.title": "Analysis",
+			"analysis.close": "Hide",
+			"analysis.overview": "Overview",
+			"analysis.hubs": "Hubs",
+			"analysis.communities": "Communities",
+			"analysis.decisions": "Decisions",
+			"analysis.timeline": "Timeline",
+			"analysis.byDegree": "by degree",
+			"analysis.byRank": "by PageRank",
+			"analysis.noDecisions": "No decisions in this graph",
+			"analysis.maker": "Maker",
+			"analysis.confidence": "Confidence",
+			"analysis.members": "Members",
+			"analysis.byType": "Node types",
+			"analysis.isolated": "Isolated",
+			"analysis.components": "Components",
+			"analysis.untaggedNote": "{n} nodes carry no conversation tag (visible under “All”)",
+			"analysis.failed": "Analysis failed",
 		};
 
-		/** 当前语言对应的字典；ctx.locale 变化时由 rebind() 换掉。 */
 		let dict = zh;
 		function T(key) {
-			return dict[key] ?? zh[key] ?? key;
+			return dict[key] ?? key;
+		}
+		/** 带一个数字的文案。 */
+		function Tn(key, n) {
+			return String(T(key)).replace("{n}", String(n));
 		}
 
 		// ───────────────────────────── 样式 ─────────────────────────────
-
-		// 面板的根元素。注意 `flex:1 1 auto; min-height:0` 而不是 `height:100%`：
-// 槽的 wrapper div 是 `display:contents`（不生成盒子），所以这根元素就是
-// conversation.view 的 .viewArea 的直接 flex item，撑满它即可 —— 不依赖父元素
-// 有确定高度。.viewArea 本身是 `display:flex; flex-direction:column; flex:1; min-height:0`。
-const CSS = `
-.semg-panel{display:flex;flex-direction:column;gap:12px;padding:14px;font-size:12px;line-height:1.6;flex:1 1 auto;min-height:0;box-sizing:border-box;overflow:auto}
-.semg-head{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px}
-/* 进行中的面板：spinner、标题、提示竖排，整块在面板里垂直+水平居中。
-   text-align 是给换行的提示文案用的 —— 不写它居中只对行盒生效，
-   第二行提示会左对齐，看着像没居中。 */
-.semg-busy{justify-content:center;align-items:center;text-align:center}
-.semg-busy-title{font-weight:600;font-size:13px}
-.semg-muted{color:var(--dsw-alias-label-secondary,#888)}
-.semg-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.semg-card{padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.04))}
-.semg-card b{display:block;font-size:17px;font-weight:600;line-height:1.3}
-.semg-card span{font-size:10px;color:var(--dsw-alias-label-secondary,#888)}
-.semg-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-/* 按钮文案 12px —— 与面板正文 / 头部入口按钮 / 统计数字同一号，
-   以前是 11px，和同一行里的 12px 元素比会显得「缩了一号」。 */
-.semg-btn{display:inline-flex;align-items:center;gap:4px;box-sizing:border-box;height:var(--semg-ctl-h,26px);padding:0 var(--semg-ctl-pad,10px);border-radius:var(--semg-ctl-radius,6px);border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));background:transparent;color:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
-.semg-btn:hover{background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.05))}
-.semg-btn[data-primary="1"]{border-color:var(--dsw-alias-brand-primary,#4d6bfe);color:var(--dsw-alias-brand-primary,#4d6bfe)}
-.semg-btn:disabled{opacity:.45;cursor:default}
-.semg-spin{width:18px;height:18px;border:2px solid var(--dsw-alias-border-l2,rgba(0,0,0,.15));border-top-color:var(--dsw-alias-brand-primary,#4d6bfe);border-radius:50%;animation:semg-spin .8s linear infinite;flex:0 0 auto}
-@keyframes semg-spin{to{transform:rotate(360deg)}}
-.semg-err{color:var(--dsw-alias-state-error-primary,#d33);font-weight:600}
-.semg-box{padding:8px 10px;border-radius:8px;background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.04));border-left:3px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12))}
-.semg-box[data-kind="error"]{border-left-color:var(--dsw-alias-state-error-primary,#d33)}
-.semg-box[data-kind="warn"]{border-left-color:#e8a33d}
-.semg-box[data-kind="ok"]{border-left-color:#3aa76d}
-/* ── 控制面板：工具栏 + 内嵌 Explorer 拼成一页 ── */
-/* 就绪态的容器：16px 内缩 + 16px 行距。两块卡片（工具栏 / 图谱）共用同一套外边距，
-   所以它们到面板边缘、以及彼此之间的距离都是 16px。
-   注意 iframe 那张卡片的 16px 是**这里**给的（宿主的 padding 是 0，它精确地盖住
-   .semg-viewbody），别再往宿主上加 padding —— 那会变成里外各 16px、共 32px。 */
-.semg-split{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12px;box-sizing:border-box;padding:16px;gap:16px}
-/* 工具栏也是一张卡片，与下面的图谱卡片同规格：1px 边框 + 8px 圆角 + 同色底。
-   原来它只贴了一条 border-bottom、并且直接顶到面板边缘，跟图谱那块对不上。 */
-/* 工具栏里的控件尺寸**只在这里定义一次**：按钮、路径 chip、过期标记共用同一套
-   高度 / 内边距 / 圆角 / 间距。以前是三种高度（按钮 28px、chip 18px、标记 18px）配
-   三种内边距（10 / 6 / 7），同一行里高低不齐；而且按钮没写 box-sizing，
-   写成 height:26px 再加 1px 边框，实际是 28px。 */
-.semg-split,.semg-panel{--semg-ctl-h:26px;--semg-ctl-pad:10px;--semg-ctl-radius:6px;--semg-ctl-gap:8px}
-
-.semg-toolbar{display:flex;flex-direction:column;gap:6px;padding:10px 12px;flex:0 0 auto;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff)}
-/* **一行**：图信息 → 四个分析按钮 → 「在浏览器打开」（靠 margin-left:auto 推到最右）。
-   宽度不够时 flex-wrap 自然换行，不做专门的响应式 —— 常规窗口宽度下就是一行。
-   以前是两行（第一行只有信息，第二行才是按钮），而且两行的按钮还差 1px。 */
-.semg-toolbar-row{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;min-width:0}
-.semg-toolbar-info{display:flex;align-items:center;gap:var(--semg-ctl-gap,8px);flex-wrap:wrap;min-width:0;flex:0 1 auto}
-/* flex:0 0 auto 在这里是安全的：它只放一个链接按钮，宽度不会超过容器 */
-.semg-toolbar-util{display:flex;align-items:center;gap:var(--semg-ctl-gap,8px);flex-wrap:wrap;flex:0 0 auto;margin-left:auto}
-/* 这一组**必须**能收缩：flex-basis 取 auto 会让它按内容宽度（约 380px）撑开，
-   于是内部的 flex-wrap 永远不触发，窄面板里直接横向溢出。 */
-.semg-toolbar-actions{display:flex;align-items:center;gap:var(--semg-ctl-gap,8px);flex-wrap:wrap;flex:0 1 auto;min-width:0}
-.semg-mini{display:inline-flex;align-items:baseline;gap:3px;white-space:nowrap}
-.semg-mini b{font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}
-/* 数字和单位都 12px：以前单位是 10px，一行「3190 节点」里两种字号，看着像没做完。 */
-.semg-mini span{font-size:12px;color:var(--dsw-alias-label-secondary,#888)}
-.semg-tag{font-size:12px;box-sizing:border-box;height:var(--semg-ctl-h,26px);line-height:var(--semg-ctl-h,26px);padding:0 var(--semg-ctl-pad,10px);border-radius:999px;background:rgba(232,163,61,.16);color:#b57517;white-space:nowrap}
-/* 图文件路径。整条路径约 100 字符，工具栏放不下，所以显示的是省略形式（完整值在
-   title 里，复制的也是完整值）。min-width:0 + overflow:hidden 让它能被压缩 ——
-   否则它自己不收缩，会把 .semg-toolbar-info 顶出容器。 */
-.semg-path{display:inline-flex;align-items:center;gap:4px;box-sizing:border-box;height:var(--semg-ctl-h,26px);min-width:0;max-width:100%;padding:0 var(--semg-ctl-pad,10px);border-radius:var(--semg-ctl-radius,6px);border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));background:transparent;color:inherit;font:inherit;cursor:pointer;overflow:hidden}
-.semg-path:hover{background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.05))}
-.semg-path code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.semg-path[data-state="copied"]{border-color:#3aa76d;color:#3aa76d}
-.semg-path[data-state="failed"]{border-color:var(--dsw-alias-state-error-primary,#d33);color:var(--dsw-alias-state-error-primary,#d33)}
-.semg-sep{width:1px;height:16px;background:var(--dsw-alias-border-l2,rgba(0,0,0,.14));margin:0 2px}
-.semg-spin-sm{width:11px;height:11px;border-width:1.5px}
-.semg-banner{display:flex;align-items:flex-start;gap:8px;padding:7px 10px;flex:0 0 auto;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.03))}
-.semg-banner[data-kind="error"]{background:rgba(221,51,51,.07)}
-.semg-banner[data-kind="ok"]{background:rgba(58,167,109,.07)}
-.semg-banner-text{flex:1 1 auto;min-width:0}
-.semg-banner-x{flex:0 0 auto;border:none;background:transparent;color:inherit;font-size:14px;line-height:1;cursor:pointer;opacity:.5;padding:0 2px}
-.semg-banner-x:hover{opacity:1}
-.semg-empty{display:flex;align-items:center;justify-content:center;padding:20px;text-align:center;color:var(--dsw-alias-label-secondary,#888)}
-.semg-code{margin-top:6px;padding:8px;border-radius:6px;background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,.03));font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;line-height:1.5;white-space:pre-wrap;word-break:break-word;text-align:left}
-/* 头部入口按钮。尺寸整套抄 DSH 自己在这个 slot 里的带字元素
-   （@deepseek-ai/dsh-client-ui-agent-preset 的 AgentPresetLabel）：
-   height 22 / radius 6 / fill-tsp-secondary / font-size 12 / gap 4 / 图标 14 且 opacity .7。
-   照抄是为了它坐在 .headerActions 里不像个外来物 —— 那一排是 flex:none，
-   宽度由内容决定，样式不统一就会一眼看出来。
-   注意这里能带文案的余量是有限的：.headerActions 是 flex:none，而 .titleCluster
-   是 flex:1;min-width:0 —— 也就是说这个按钮每宽 1px，标题就少 1px（标题会走省略号）。
-   所以文案取短、给 max-width，不用「对话知识图谱」那种全称（那个留给 title）。 */
-.semg-action{display:inline-flex;align-items:center;gap:4px;height:22px;max-width:180px;padding:0 8px;border-radius:6px;border:none;background:var(--dsw-alias-fill-tsp-secondary,rgba(0,0,0,.045));color:var(--dsw-alias-label-secondary,#666);font:inherit;font-size:12px;line-height:22px;white-space:nowrap;cursor:pointer;overflow:hidden}
-.semg-action:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.07));color:var(--dsw-alias-label-primary,#222)}
-.semg-action-icon{opacity:.7;flex:none}
-.semg-action-text{overflow:hidden;text-overflow:ellipsis}
-.semg-viewbody{position:relative;flex:1 1 auto;min-height:0}
-.semg-viewholder{width:100%;height:100%}
-/* iframe 本身**不在这里** —— 它常驻 body 上的 [data-semg-frame-host]，这里只是它的占位。
-   原因见 ExplorerFrame 的注释：视图被切走会卸载组件，iframe 必须活过卸载才不重载。 */
-/* 宿主精确盖住 .semg-viewbody 的矩形（padding 为 0，不要再加）——
-   iframe 到面板边缘那 16px 由 .semg-split 的内边距给，从这里加会变成 32px。 */
-[data-semg-frame-host]{position:fixed;box-sizing:border-box;display:none;z-index:5}
-[data-semg-frame-host] iframe{display:block;width:100%;height:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff)}
-/* 图谱标签激活时藏掉对话输入框。data-composer-seat 是 ConversationRoot 里写死的稳定属性，
-   不是哈希类名；隐藏而不是卸载，所以切回「对话」草稿还在。 */
-[data-semg-hide-composer] [data-composer-seat]{display:none}
-.semg-viewload{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:8px;pointer-events:none;color:var(--dsw-alias-label-secondary,#888);font-size:12px}
+		//
+		// 字号统一 12px：工具栏统计、按钮文案、分析抽屉正文都是 12px，
+		// 统计数字与它后面的单位同号（只有字重不同），免得数字和单位大小不一。
+		// 等宽只给路径那一处 —— 路径要能一眼看出层级。
+		const CSS = `
+[data-semgp-root]{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12px}
+[data-semgp-bar]{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(128,128,128,.22)}
+[data-semgp-sub]{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:6px 12px;border-bottom:1px solid rgba(128,128,128,.14);color:rgba(128,128,128,.95)}
+[data-semgp-spacer]{flex:1 1 auto}
+[data-semgp-seg]{display:inline-flex;border:1px solid rgba(128,128,128,.35);border-radius:7px;overflow:hidden}
+[data-semgp-seg] button{font-size:12px;line-height:18px;padding:2px 10px;border:0;background:transparent;color:inherit;cursor:pointer}
+[data-semgp-seg] button[aria-pressed="true"]{background:rgba(128,128,128,.22);font-weight:600}
+[data-semgp-stats]{display:inline-flex;gap:10px;color:rgba(128,128,128,.95)}
+[data-semgp-stats] b{font-weight:600;font-size:12px}
+[data-semgp-btn]{font-size:12px;line-height:18px;padding:3px 10px;border:1px solid rgba(128,128,128,.35);border-radius:7px;background:transparent;color:inherit;cursor:pointer;text-decoration:none;display:inline-flex;align-items:center;gap:5px;font-family:inherit}
+[data-semgp-btn]:hover{background:rgba(128,128,128,.14)}
+[data-semgp-btn][disabled]{opacity:.5;cursor:default}
+[data-semgp-path]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52ch}
+[data-semgp-body]{position:relative;flex:1 1 auto;min-height:0;display:flex}
+[data-semgp-canvas]{position:relative;flex:1 1 auto;min-width:0;min-height:0}
+[data-semgp-holder]{position:absolute;inset:0}
+[data-semgp-center]{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;padding:24px;text-align:center;color:rgba(128,128,128,.95);overflow:auto}
+[data-semgp-center] strong{font-size:13px;color:inherit}
+[data-semgp-center] p{margin:0;max-width:60ch;line-height:1.7}
+[data-semgp-center] pre{margin:0;max-width:64ch;text-align:left;font-size:12px;line-height:1.6;padding:10px 12px;border:1px solid rgba(128,128,128,.28);border-radius:8px;background:rgba(128,128,128,.08);white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+[data-semgp-warn]{padding:6px 12px;border-bottom:1px solid rgba(128,128,128,.14);color:#c98a00}
+[data-semgp-spin]{width:18px;height:18px;border:2px solid rgba(128,128,128,.35);border-top-color:rgba(128,128,128,.9);border-radius:50%;animation:semgp-spin 900ms linear infinite}
+@keyframes semgp-spin{to{transform:rotate(360deg)}}
+[data-semgp-drawer]{width:380px;flex:0 0 380px;border-left:1px solid rgba(128,128,128,.22);display:flex;flex-direction:column;min-height:0}
+[data-semgp-drawer] header{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid rgba(128,128,128,.14)}
+[data-semgp-drawer] header strong{font-size:12px}
+[data-semgp-tabs]{display:flex;gap:6px;flex-wrap:wrap;padding:8px 12px;border-bottom:1px solid rgba(128,128,128,.14)}
+[data-semgp-tabs] button{font-size:12px;padding:2px 9px;border:1px solid rgba(128,128,128,.3);border-radius:999px;background:transparent;color:inherit;cursor:pointer;font-family:inherit}
+[data-semgp-tabs] button[aria-pressed="true"]{background:rgba(128,128,128,.22)}
+[data-semgp-pane]{flex:1 1 auto;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:12px}
+[data-semgp-grid]{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+[data-semgp-card]{border:1px solid rgba(128,128,128,.22);border-radius:8px;padding:8px 10px;display:flex;flex-direction:column;gap:6px}
+[data-semgp-card] .k{color:rgba(128,128,128,.95)}
+[data-semgp-card] .v{font-weight:600;font-size:13px}
+[data-semgp-row]{display:flex;align-items:baseline;gap:8px}
+[data-semgp-row] .n{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+[data-semgp-row] .t{color:rgba(128,128,128,.95)}
+[data-semgp-row] .d{font-variant-numeric:tabular-nums;color:rgba(128,128,128,.95)}
+[data-semgp-chip]{display:inline-block;font-size:12px;padding:1px 7px;border:1px solid rgba(128,128,128,.3);border-radius:999px;margin:0 4px 4px 0}
+[data-semgp-bar]{height:5px;border-radius:3px;background:rgba(128,128,128,.28)}
+[data-semgp-barwrap]{display:flex;flex-direction:column;gap:3px}
+[data-semgp-muted]{color:rgba(128,128,128,.95)}
+[data-semgp-frame-host]{position:fixed;z-index:5;padding:0;box-sizing:border-box;display:none;background:var(--dsw-alias-bg-base,transparent)}
+[data-semgp-frame-host] iframe{width:100%;height:100%;border:0;display:block;background:var(--dsw-alias-bg-base,transparent)}
+[data-semgp-hide-composer] [data-composer-seat]{display:none}
 `;
 
-		let styleInjected = false;
+		/** 注入样式（只注一次）。 */
 		function ensureStyles() {
-			if (styleInjected || typeof document === "undefined") return;
-			styleInjected = true;
-			const tag = document.createElement("style");
-			tag.dataset.plugin = "dsh-semantica-graph";
-			tag.textContent = CSS;
-			document.head.appendChild(tag);
+			const id = "dsh-semantica-graph-style";
+			if (document.getElementById(id)) return;
+			const el = document.createElement("style");
+			el.id = id;
+			el.textContent = CSS;
+			document.head.appendChild(el);
 		}
 
-		// ───────────────────────────── 图标 ─────────────────────────────
+		// ───────────────────────────── HTTP ─────────────────────────────
 
-		function IconGraph(props) {
-			const size = (props && props.size) || 16;
-			return h(
-				"svg",
-				{
-					width: size,
-					height: size,
-					viewBox: "0 0 16 16",
-					fill: "none",
-					"aria-hidden": "true",
-					className: props && props.className,
-				},
-				h("circle", { cx: 8, cy: 2.6, r: 1.9, fill: "currentColor" }),
-				h("circle", { cx: 2.7, cy: 12.4, r: 1.9, fill: "currentColor" }),
-				h("circle", { cx: 13.3, cy: 12.4, r: 1.9, fill: "currentColor" }),
-				h("path", {
-					d: "M8 4.5 3.4 10.7M8 4.5l4.6 6.2M4.4 12.9h7.2",
-					stroke: "currentColor",
-					// React 要求 SVG 属性用 camelCase；写成 kebab-case 每次渲染
-					// 都会刷 "Invalid DOM property `stroke-width`" 警告。
-					strokeWidth: "1.2",
-					strokeLinecap: "round",
-					opacity: "0.75",
-				}),
-			);
+		async function getJson(path) {
+			const res = await fetch(path, { headers: { accept: "application/json" } });
+			return res.json();
 		}
-
-		/**
-		 * 复制图标（两个错位的方框）。
-		 *
-		 * 用它而不是文件图标：这个 chip 的**动作**是复制，不是"打开文件" ——
-		 * 图标要提示点击之后会发生什么。
-		 */
-		function IconCopy(props) {
-			const size = (props && props.size) || 16;
-			return h(
-				"svg",
-				{
-					width: size,
-					height: size,
-					viewBox: "0 0 16 16",
-					fill: "none",
-					"aria-hidden": "true",
-					className: props && props.className,
-				},
-				h("rect", {
-					x: 5.6, y: 5.6, width: 8.2, height: 8.2, rx: 1.6,
-					stroke: "currentColor", strokeWidth: "1.3",
-				}),
-				h("path", {
-					d: "M10.4 5.4V3.8c0-.9-.7-1.6-1.6-1.6H3.8c-.9 0-1.6.7-1.6 1.6v5c0 .9.7 1.6 1.6 1.6h1.6",
-					stroke: "currentColor", strokeWidth: "1.3", strokeLinecap: "round",
-				}),
-			);
-		}
-
-		/**
-		 * 外链图标：一个开口的方框，一支箭头从右上角射出去。
-		 *
-		 * 换掉了原来的「↗」。单独一个斜箭头在 UI 里至少有四种读法（分享 / 上传 /
-		 * 跳转 / 放大），配上「重新打开」「在浏览器打开」两个只有 hover 才出提示的图标，
-		 * 根本猜不出哪个是哪个。「方框 + 外射箭头」是「开去别处」的通用画法，不用猜。
-		 */
-		function IconExternal(props) {
-			const size = (props && props.size) || 16;
-			return h(
-				"svg",
-				{
-					width: size,
-					height: size,
-					viewBox: "0 0 16 16",
-					fill: "none",
-					"aria-hidden": "true",
-					className: props && props.className,
-				},
-				h("path", {
-					d: "M9.8 3.2H4A1.7 1.7 0 0 0 2.3 4.9v7A1.7 1.7 0 0 0 4 13.6h7a1.7 1.7 0 0 0 1.7-1.7V6.2",
-					stroke: "currentColor", strokeWidth: "1.3", strokeLinecap: "round", strokeLinejoin: "round",
-				}),
-				h("path", {
-					d: "M6.9 9.1 13.5 2.5",
-					stroke: "currentColor", strokeWidth: "1.3", strokeLinecap: "round",
-				}),
-				h("path", {
-					d: "M9.9 2.5h3.6v3.6",
-					stroke: "currentColor", strokeWidth: "1.3", strokeLinecap: "round", strokeLinejoin: "round",
-				}),
-			);
-		}
-
-		/** 复制成功的对勾。 */
-		function IconCheck(props) {
-			const size = (props && props.size) || 16;
-			return h(
-				"svg",
-				{
-					width: size,
-					height: size,
-					viewBox: "0 0 16 16",
-					fill: "none",
-					"aria-hidden": "true",
-					className: props && props.className,
-				},
-				h("path", {
-					d: "M3 8.4 6.3 11.7 13 5",
-					stroke: "currentColor", strokeWidth: "1.7",
-					strokeLinecap: "round", strokeLinejoin: "round",
-				}),
-			);
-		}
-
-		// ─────────────────────────── 与宿主通信 ───────────────────────────
 
 		async function postJson(path, body) {
-			const resp = await fetch(path, {
+			const res = await fetch(path, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
-				body: JSON.stringify(body),
+				body: JSON.stringify(body ?? {}),
 			});
-			const text = await resp.text();
-			try {
-				return JSON.parse(text);
-			} catch {
-				return { ok: false, error: `响应不是 JSON（HTTP ${resp.status}）：${text.slice(0, 200)}` };
-			}
-		}
-
-		/**
-		 * 让宿主把图建好、把 Explorer 拉起来，返回它的 URL。
-		 * @param refresh 为 true 时忽略缓存，强制重新抽取
-		 */
-		function prepare(sessionId, refresh) {
-			return postJson("/api-semantica/prepare", { sessionId, refresh: refresh === true });
-		}
-
-		/**
-		 * 让宿主新开一个子会话，把图数据注进去让 AI 分析。
-		 *
-		 * kind 是四种分析之一：retro / structure / quality / advice。
-		 * 返回 `{ ok:true, sessionId, label, digestChars, injected, drillable }`，
-		 * 失败时 `ok:false` 且带 code —— 宿主侧的 code 有
-		 * session-controller-unavailable / parent-not-live / create-failed
-		 * / prompt-failed / graph-missing / unknown-kind，以及 prepare 那一串。
-		 */
-		function analyze(sessionId, kind) {
-			return postJson("/api-semantica/analyze", { sessionId, kind });
-		}
-
-		/** 四个分析按钮的 kind 与文案 key。 */
-		const ANALYZE_KINDS = [
-			["retro", "analyze.retro"],
-			["structure", "analyze.structure"],
-			["quality", "analyze.quality"],
-			["advice", "analyze.advice"],
-		];
-
-		// ──────────────── 跳到某个会话（AI 分析建好新对话后用） ────────────────
-
-		/**
-		 * sessions 服务句柄。走延迟注入（`ctx.inject(["sessions"], …)`）而不是
-		 * 写进 `inject` 数组 —— 后者是硬依赖，服务缺席时整个插件加载不起来。
-		 * 参考 `dsh-client-ui-workflow-run` 的用法，官方就是 `ctx.sessions.open(id)`。
-		 */
-		let sessionsSvc = null;
-
-		/**
-		 * 把界面切到某个会话。成功返回 true。
-		 * 失败只是不跳转，不影响已经建好的对话 —— 用户自己在列表里也能找到。
-		 */
-		function openSession(id) {
-			if (!sessionsSvc || typeof sessionsSvc.open !== "function") return false;
-			try {
-				sessionsSvc.open(id);
-				return true;
-			} catch (e) {
-				console.warn("[semantica-graph] sessions.open 失败", e);
-				return false;
-			}
-		}
-
-
-
-		// ───────────────────────── 头部动作按钮 ─────────────────────────
-
-		function GraphButton(props) {
-			ensureStyles();
-			const sessionId = props.sessionId;
-			const open = props.openPanel;
-			const onClick = useCallback(() => {
-				if (typeof open === "function") open(sessionId);
-			}, [open, sessionId]);
-			return h(
-				"button",
-				{
-					type: "button",
-					className: "semg-action",
-					title: T("action.title"),
-					"aria-label": T("action.aria"),
-					onClick,
-				},
-				h(IconGraph, { size: 14, className: "semg-action-icon" }),
-				h("span", { className: "semg-action-text" }, T("action.label")),
-			);
-		}
-
-		// ───────────────────────── 控制面板 tab ─────────────────────────
-
-		/**
-		 * 工具栏里的一个统计项，例如「2186 节点」。
-		 *
-		 * 以前是 2×2 的大卡片（`semg-card`），挪进工具栏之后必须紧凑 ——
-		 * 数字用等宽数字（tabular-nums）以免位数变化时左右跳。
-		 */
-		function MiniStat(labelKey, value) {
-			return h(
-				"span",
-				{ className: "semg-mini", key: labelKey },
-				h("b", null, String(value ?? "—")),
-				h("span", null, T(labelKey)),
-			);
-		}
-
-		/** 中间省略：`session-c4f2f73e-08ac-…-f5b740.json` 这种，两头都保留。 */
-		function elideMiddle(text, max) {
-			if (!text || text.length <= max) return text || "";
-			const keep = max - 1;
-			const head = Math.ceil(keep / 2);
-			const tail = keep - head;
-			return text.slice(0, head) + "\u2026" + (tail > 0 ? text.slice(text.length - tail) : "");
-		}
-
-		/** 目录只留最后一级 + 中间省略的文件名 —— 完整路径放不进工具栏。 */
-		function shortenGraphPath(p) {
-			if (!p) return "";
-			const i = p.lastIndexOf("/");
-			if (i < 0) return elideMiddle(p, 48);
-			const dirTail = p.slice(0, i).split("/").filter(Boolean).slice(-1)[0] || "";
-			return "\u2026/" + dirTail + "/" + elideMiddle(p.slice(i + 1), 30);
-		}
-
-		/**
-		 * 图文件的落盘路径，点一下复制完整路径。
-		 *
-		 * 为什么要显示：这张图就是插件写到磁盘上的一个普通 JSON 文件。用户想自己拿去看
-		 * （编辑器打开、丢给别的工具、备份、对比两次抽取）是很自然的事，但之前路径在界面上
-		 * 完全不可见，只能去翻文档猜。
-		 *
-		 * 复制的是完整值，显示的才是省略值 —— 点一下拿到的必须是能直接 cd 过去的那种。
-		 */
-		function PathChip(props) {
-			const graphPath = props.path;
-			const [state, setState] = useState("idle"); // idle | copied | failed
-			const timer = useRef(0);
-
-			const flash = useCallback((next) => {
-				setState(next);
-				if (timer.current) clearTimeout(timer.current);
-				timer.current = setTimeout(() => setState("idle"), 1600);
-			}, []);
-
-			const copy = useCallback(() => {
-				const fallback = () => {
-					// navigator.clipboard 在非安全上下文里是 undefined；127.0.0.1 算安全上下文，
-					// 但 GUI 有可能被挂到别的 host 上，所以留一条退路。
-					try {
-						const ta = document.createElement("textarea");
-						ta.value = graphPath;
-						ta.setAttribute("readonly", "");
-						ta.style.position = "fixed";
-						ta.style.top = "-1000px";
-						ta.style.opacity = "0";
-						document.body.appendChild(ta);
-						ta.select();
-						const ok = document.execCommand("copy");
-						document.body.removeChild(ta);
-						flash(ok ? "copied" : "failed");
-					} catch (e) {
-						flash("failed");
-					}
-				};
-				try {
-					if (navigator.clipboard && navigator.clipboard.writeText) {
-						navigator.clipboard.writeText(graphPath).then(
-							() => flash("copied"),
-							() => fallback(),
-						);
-						return;
-					}
-				} catch (e) {
-					/* 落到 fallback */
-				}
-				fallback();
-			}, [graphPath, flash]);
-
-			useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
-
-			if (!graphPath) return null;
-			const label =
-				state === "copied" ? T("path.copied") : state === "failed" ? T("path.failed") : null;
-			return h(
-				"button",
-				{
-					type: "button",
-					className: "semg-path",
-					"data-state": state,
-					title: T("path.tip") + "\n" + graphPath,
-					onClick: copy,
-				},
-				h(state === "copied" ? IconCheck : IconCopy, { size: 12 }),
-				h("code", null, label || shortenGraphPath(graphPath)),
-			);
-		}
-
-
-		/**
-		 * 知识图谱面板 —— 注册在 conversation.view 上的那个对话视图。
-		 *
-		 * 它是**被槽渲染的**，所以 props 由槽系统给：ownerProps 是
-		 * `{ viewRequest, openView, completeViewRequest }`，standardProps 里有
-		 * `sessionId`。这里只用得到 sessionId。
-		 *
-		 * 以前这个组件是 better-sidebar 的 tab，props 是
-		 * `{ ctx, store, scope, visible, tab }` —— 那四个现在都不需要了：
-		 *   ctx     —— 回调里其实没用到（只是 dep 数组里挂着），删
-		 *   store   —— 只给「自动加宽面板」用，这个功能本身没了
-		 *   scope   —— 只为兜底取 sessionId，现在槽直接给 sessionId
-		 *   visible —— 视图被切走时直接卸载，挂载着就是可见
-		 */
-		/**
-		 * 上一次 prepare 成功的结果，按会话存。**它同时活过组件卸载。**
-		 *
-		 * 为什么需要：conversation.view 槽对非激活视图是过滤掉的，所以切走标签会卸载
-		 * 这个组件、切回来重新挂载。没有缓存的话，每次切回来都是「stats/url 全空 →
-		 * 重新拉一次 → 才显示」，看起来就像每次都在重新提取（宿主其实有缓存、不会真
-		 * 重抽，但客户端这一下照样是空的）。
-		 *
-		 * `at` 记时间戳，用来给「静默复查」限流。
-		 */
-		const preparedBySession = new Map();
-
-		/**
-		 * 缓存多久之后才值得静默复查一次（只为刷新 `图已过期` 这个标记）。
-		 *
-		 * 不能每次挂载都查：宿主那边为了判断 stale 要读并解析整个会话日志，
-		 * 长会话是有实打实开销的，而切标签是高频操作。
-		 */
-		const REVALIDATE_AFTER_MS = 20_000;
-
-		function LauncherView(props) {
-			ensureStyles();
-			const sessionId = props.sessionId || null;
-			// 有缓存就直接以「就绪」开场 —— 切回来是秒开，不闪加载态、不重抽
-			const seed = sessionId ? preparedBySession.get(sessionId) : null;
-
-			const [phase, setPhase] = useState(seed ? "ready" : "idle"); // idle | working | ready | error
-			const [stats, setStats] = useState(seed ? seed.stats : null);
-			const [url, setUrl] = useState(seed ? seed.url : null);
-			const [err, setErr] = useState(null);
-			const [stale, setStale] = useState(seed ? seed.stale : false);
-			// AI 分析：哪个按钮在跑（null = 没跑），以及上一次的结果
-			const [busyKind, setBusyKind] = useState(null);
-			const [analysis, setAnalysis] = useState(null);
-			// 这次挂载已经为哪个会话发起过 prepare。
-			//
-			// 缓存是**异步**才写进去的（要等宿主返回），所以在「已发起、还没回来」这段窗口里
-			// 光看缓存是拦不住的 —— 仍然需要一个同步守卫，否则 effect 一旦重跑就会重复发起
-			// （React StrictMode 在 dev 下本来就会把 effect 跑两遍）。
-			const preparedFor = useRef(null);
-
-			const run = useCallback(
-				async (refresh, opts) => {
-					// silent：静默复查。不置 working、失败也不把面板打成错误页 ——
-					// 它是「顺便看一眼图过期没有」，不该打扰已经画好的界面。
-					const silent = Boolean(opts && opts.silent);
-					if (!sessionId) {
-						if (silent) return;
-						setErr({ error: "拿不到 sessionId" });
-						setPhase("error");
-						return;
-					}
-					if (!silent) {
-						setPhase("working");
-						setErr(null);
-					}
-					try {
-						const data = await prepare(sessionId, refresh);
-						if (!data || data.ok !== true) {
-							if (silent) return;
-							setErr(data || { error: "宿主没有返回结果" });
-							setPhase("error");
-							return;
-						}
-						const nextStats = data.stats || null;
-						const nextUrl = data.url || null;
-						const nextStale = data.stale === true;
-						setStats(nextStats);
-						setUrl(nextUrl);
-						setStale(nextStale);
-						setPhase("ready");
-						preparedBySession.set(sessionId, {
-							stats: nextStats,
-							url: nextUrl,
-							stale: nextStale,
-							at: Date.now(),
-						});
-						// 刻意**不自动打开 Explorer 标签**。
-						//
-						// 更早的版本在这里直接切到 Explorer 界面，理由是「用户点按钮就是为了看图」。
-						// 但那会把刚打开的控制面板顶掉：
-						// 第一次点头部图标 → 面板刚出现就被 Explorer 替换 → 用户看到
-						// 的是 semantica 的界面，面板底部的四个分析按钮压根没机会被看到
-						// （得再点一次图标才回得来）。
-						//
-						// 现在面板留在原处，要看图点「打开完整 Explorer」那个主按钮。
-					} catch (e) {
-						if (silent) return;
-						setErr({ error: String((e && e.message) || e) });
-						setPhase("error");
-					}
-				},
-				[sessionId],
-			);
-
-			// 挂载效果。规则一句话：**有缓存就不重抽。**
-			//
-			// 以前这里是「挂载就 prepare 一次」，理由是「切走→切回等于重来一次，正好让
-			// 死掉的 Explorer 自愈」。但那个代价主人直接感受到了：「每次切 tab 都会展示
-			// 提取，好难受」—— 宿主确实有缓存、不会真重抽，可客户端这一下 stats/url 是空的，
-			// 界面照样白一下。
-			//
-			// 现在缓存放在组件外（会活过卸载），所以切回来是立刻就有画面。
-			// 自愈改由两条路兜：`重新抽取` 按钮（显式），以及缓存超过
-			// REVALIDATE_AFTER_MS 后的静默复查。
-			useEffect(() => {
-				if (!sessionId) return;
-				const cached = preparedBySession.get(sessionId);
-				if (!cached) {
-					// 第一次看这个会话：正常拉一次（会有加载态）。
-					// 同步守卫挡住重复发起 —— 见 preparedFor 的注释。
-					if (preparedFor.current === sessionId) return;
-					preparedFor.current = sessionId;
-					run(false);
-					return;
-				}
-				// 有缓存 → **不重抽**。上面已经从缓存把状态初始化好了，所以这里什么都不做，
-				// 界面立刻就位。这正是主人反馈的「每次切 tab 都在提取」的修法。
-				//
-				// 只有缓存放了一会儿（超过 REVALIDATE_AFTER_MS）才静默复查一次，只为让
-				// 「图已过期」这个标记跟上会话 —— 静默模式不动 phase，所以不会闪。
-				if (Date.now() - cached.at >= REVALIDATE_AFTER_MS) run(false, { silent: true });
-			}, [sessionId, run]);
-
-			// 面板在的时候把对话输入框藏掉（它挤在整屏画布下面既用不上又占地方）。
-			// 挂载即隐藏、卸载即恢复 —— 所以只切到「对话」标签，输入框和草稿都还在。
-			useEffect(() => {
-				setComposerHidden(true);
-				return () => setComposerHidden(false);
-			}, []);
-
-			// — 开子会话让 AI 分析 —
-			//
-			// 刻意**不复用 phase**：分析失败不该把整个面板打成错误页（图还好好的），
-			// 所以结果单独放 analysis，内联显示在按钮下面。
-			const runAnalyze = useCallback(
-				async (kind) => {
-					if (!sessionId) return;
-					setBusyKind(kind);
-					setAnalysis(null);
-					try {
-						const data = await analyze(sessionId, kind);
-						const result = data || { ok: false, error: "宿主没有返回结果" };
-						// 成功就直接切过去。用户要的是「开新对话」，不是留在原地面板
-						// 上看一行「已创建」——那样还得自己去列表里找。
-						if (result.ok === true && result.sessionId) {
-							result.navigated = openSession(result.sessionId);
-						}
-						setAnalysis(result);
-					} catch (e) {
-						setAnalysis({ ok: false, error: String((e && e.message) || e) });
-					} finally {
-						setBusyKind(null);
-					}
-				},
-				[sessionId],
-			);
-
-			// — 全屏的进行中 / 出错 —
-			//
-			// **只在还没有图的时候**占满整块。已经画出图之后再点「重新抽取」，
-			// 不该把图换成一块 spinner —— 工具栏里转个小圈就够了（见下面）。
-			if (phase === "working" && !url) {
-				return h(
-					"div",
-					{ className: "semg-panel semg-busy" },
-					h("div", { className: "semg-spin" }),
-					h("div", { className: "semg-busy-title" }, T("state.working")),
-					h("div", { className: "semg-muted" }, T("state.workingHint")),
-				);
-			}
-
-			if (phase === "error" && !url) {
-				const hint = err && err.hint;
-				const code = err && err.code;
-				return h(
-					"div",
-					{ className: "semg-panel" },
-					h("div", { className: "semg-head semg-err" }, T("error.title")),
-					h(
-						"div",
-						{ className: "semg-box", "data-kind": "error" },
-						h("div", null, (err && err.error) || "未知错误"),
-						code ? h("div", { className: "semg-muted" }, `code: ${code}`) : null,
-					),
-					hint ? h("div", { className: "semg-code" }, hint) : null,
-					h(
-						"div",
-						{ className: "semg-row" },
-						h(
-							"button",
-							{ type: "button", className: "semg-btn", onClick: () => run(true) },
-							T("error.retry"),
-						),
-					),
-				);
-			}
-
-			// — 就绪（或还没开始）—
-			//
-			// **一个页面**：上面是工具栏（左边基本信息、右边按钮），下面是整块
-			// Explorer。以前这里是两个标签页 —— 先看信息页，再手动点开图 ——
-			// 反馈是「太粗暴了」，确实：信息和图本来就该一起看。
-			//
-			// 布局靠 semg-split：工具栏 flex:0 0 auto（高度自适应），
-			// ExplorerFrame 的 semg-viewbody 是 flex:1 1 auto 吃掉剩下的高度，
-			// 所以图总是撑满、不会被工具栏挤没。
-			const engineLine =
-				stats && stats.elapsed != null
-					? `${T("stat.took")} ${Number(stats.elapsed).toFixed(1)}s · ` +
-						`semantica ${stats.engine && stats.engine.semantica ? stats.engine.semantica : "?"} / ` +
-						`Python ${stats.engine && stats.engine.python ? stats.engine.python : "?"}`
-					: null;
-
-			// 结果提示条。成功且已经跳过去了就没什么好说的 —— 用户已经在新对话里。
-			let banner = null;
-			if (analysis && !(analysis.ok === true && analysis.navigated === true)) {
-				const good = analysis.ok === true;
-				let body;
-				if (good) {
-					body = [
-						T("analyze.done") + " ",
-						h("b", { key: "label" }, analysis.label || analysis.sessionId || ""),
-						analysis.navigated === false
-							? h("div", { key: "manual", className: "semg-muted" }, T("analyze.manual"))
-							: null,
-						analysis.injected === false
-							? h("div", { key: "nodigest", className: "semg-muted" }, T("analyze.noDigest"))
-							: null,
-						analysis.drillable === false
-							? h("div", { key: "nodrill", className: "semg-muted" }, T("analyze.noDrill"))
-							: null,
-					];
-				} else {
-					body = analysis.code === "graph-missing" ? T("analyze.needPrepare") : analysis.error || "未知错误";
-				}
-				banner = h(
-					"div",
-					{ className: "semg-banner", "data-kind": good ? "ok" : "error" },
-					h("span", { className: "semg-banner-text" }, body),
-					h(
-						"button",
-						{
-							type: "button",
-							className: "semg-banner-x",
-							title: T("action.dismiss"),
-							onClick: () => setAnalysis(null),
-						},
-						"×",
-					),
-				);
-			}
-
-			return h(
-				"div",
-				{ className: "semg-split" },
-
-				// ————————————— 工具栏 —————————————
-				//
-				// 明确分成两行，不靠 flex-wrap 碰运气：
-				//   第一行 —— 左边基本信息，右边工具按钮
-				//   第二行 —— 四个分析按钮
-				//
-				// 一开始把八个按钮塞进同一个 flex-wrap 容器，实测在 320px 面板里横向
-				// 溢出 315px：`.semg-toolbar-actions` 是 flex:0 0 auto，flex-basis 取的
-				// 是内容宽度（625px），它自己不收缩，内部的 wrap 就永远不会触发。
-				// 拆成两行、并让分析按钮那行撑满容器宽度，才不会溢出。
-				h(
-					"div",
-					{ className: "semg-toolbar" },
-
-					h(
-						"div",
-						{ className: "semg-toolbar-row" },
-
-						// 图信息这一组：图标 + 四个统计 + 过期标记 + 重新抽取 + 落盘路径。
-						// 它和下面的按钮组同处一行 —— 宽度不够时 flex-wrap 会把后面的组
-						// 挤到下一行，不需要按宽度写分支。
-						h(
-							"div",
-							{ className: "semg-toolbar-info", title: engineLine || undefined },
-							h(IconGraph, { size: 14 }),
-							stats
-								? [
-										MiniStat("stat.nodes", stats.nodes),
-										MiniStat("stat.edges", stats.edges),
-										MiniStat("stat.entities", stats.entities),
-										MiniStat("stat.relations", stats.relations),
-									]
-								: h("span", { className: "semg-muted" }, T("state.empty")),
-							stale
-								? h("span", { className: "semg-tag", title: T("note.stale") }, T("note.staleShort"))
-								: null,
-							// 重新抽取：紧跟在过期标记右边。这两者是「同一条消息」的「症状 + 处理」——
-							// 分开在两行里，看到「图已过期」的人还得自己去找补救按钮。
-							// 它不看 stale 状态，永远显示：没有图的时候也靠它建第一张。
-							h(
-								"button",
-								{
-									type: "button",
-									className: "semg-btn",
-									title: T("action.refresh"),
-									disabled: phase === "working",
-									onClick: () => run(true),
-								},
-								phase === "working"
-									? h("span", { className: "semg-spin semg-spin-sm" })
-									: T("action.refresh"),
-							),
-							// 落盘路径。放在统计数字之后 —— 它和那几个数字一样是「这张图的元信息」，
-							// 而不是操作。点一下复制完整路径。
-							stats && stats.graphPath
-								? h(PathChip, { key: "path", path: stats.graphPath })
-								: null,
-						),
-
-					// 四个分析按钮，然后是被 margin-left:auto 推到最右的「在浏览器打开」。
-					// 两组都是「操作」，用右对齐而不是竖线分隔 —— 加线反而像两个区块。
-
-
-						// 四个分析按钮
-						h(
-							"div",
-							{ className: "semg-toolbar-actions" },
-							ANALYZE_KINDS.map(([kind, key]) =>
-								h(
-									"button",
-									{
-										key,
-										type: "button",
-										className: "semg-btn",
-										title: `${T(key)} — ${T("analyze.tip")}`,
-										disabled: busyKind !== null || phase === "working",
-										onClick: () => runAnalyze(kind),
-									},
-									busyKind === kind ? h("span", { className: "semg-spin semg-spin-sm" }) : T(key),
-								),
-							),
-						),
-
-						// 只剩一个「在浏览器打开」。
-						//
-						// 这里原本还有「刷新」（重挂 iframe、不重跑抽取）和「重新打开」。刷新删掉后
-						// 面板内就没有手动重载入口了 —— 但那不是能力丢失：面板改成每次「收起 → 展开」
-						// 都重新 prepare 一次，Explorer 挂掉时宿主会重拉 worker、换新端口，url 变了
-						// iframe 重挂（url 变了时 pointFrameHostAt 会换掉那个 iframe）。
-						//
-						// 原本还有「重新打开」，在侧边栏另开一个整屏标签看图。那个按钮是它唯一的入口，
-						// 删掉之后 ExplorerView / openExplorerTab 那套就彻底到不了了，一并删了 ——
-						// 想恢复的话 git revert 这个提交就有，看大图用 ↗ 去浏览器。
-						h(
-							"div",
-							{ className: "semg-toolbar-util" },
-							url
-								? h(
-									"a",
-									{
-										className: "semg-btn",
-										href: url,
-										target: "_blank",
-										rel: "noreferrer",
-										title: T("action.external"),
-									},
-									h(IconExternal, { size: 14 }),
-									T("action.external"),
-								)
-								: null,
-						),
-					),
-				),
-
-				banner,
-
-				// ————————————— 图 —————————————
-				url
-					? h(ExplorerFrame, { url })
-					: h(
-							"div",
-							{ className: "semg-viewbody semg-empty" },
-							h("span", null, T("state.emptyHint")),
-						),
-			);
+			return res.json();
 		}
 
 		// ─────────────────── 内嵌的 Explorer（iframe） ───────────────────
 		//
 		// ## 为什么这段这么绕：iframe 必须活过组件卸载
 		//
-		// conversation.view 槽对非激活视图是**过滤掉**的（renderer 里就是
-		// `list.filter(item => item.id === opts.only)`），所以切走标签会真的卸载我们的
+		// conversation.view 槽对非激活视图是**过滤掉**的，所以切走标签会真的卸载我们的
 		// 组件 —— 连带销毁里面的 iframe。而 Explorer 是个 SPA，每次重载都要从头启动，
-		// 于是每次切回来看起来都像「又在提取」。
+		// 于是每次切回来看起来都像「又在打开」。
 		//
 		// 实测过两条路，第一条是死的：
 		//
-		//   1. 「卸载前把 iframe 抢救到别处、回来再搬回去」—— **不行**。playwright 实测
-		//      在 DOM 里 appendChild 搬动一个 iframe 会让它**重新加载**（搬 4 次 = 加载
-		//      5 次）。iframe 一旦脱离文档，它的浏览上下文就被丢弃了。
-		//
-		//   2. 「iframe 从头到尾待在同一个父节点里，宿主挂在 body 上、只改 CSS」—— **行**。
-		//      实测只改宿主的 display（含 display:none ↔ block）、visibility、尺寸，
-		//      累计 load 次数恒为 1。
+		//   1. 「卸载前把 iframe 抢救到别处、回来再搬回去」—— 不行。在 DOM 里
+		//      appendChild 搬动一个 iframe 会让它**重新加载**（搬 4 次 = 加载 5 次）。
+		//      iframe 一旦脱离文档，它的浏览上下文就被丢弃了。
+		//   2. 「iframe 从头到尾待在同一个父节点里，宿主挂在 body 上、只改 CSS」—— 行。
+		//      只改宿主的 display / 尺寸，累计 load 次数恒为 1。
 		//
 		// 所以宿主常驻 document.body（不随视图卸载），靠 position:fixed 摆到视图里那个
 		// 占位元素的位置上。没用 createPortal —— 客户端半侧只能 require("react")，
@@ -1011,8 +255,11 @@ const CSS = `
 		const frameHost = {
 			el: null,
 			iframe: null,
+			/** 当前 iframe 指向的 url。 */
 			url: null,
-			/** 已经加载完成的 url；组件后挂载时据此决定要不要显示加载遮罩 */
+			/** 这个 url 属于哪个视图（mode:sessionId）。 */
+			key: null,
+			/** 已经加载完成的 url；组件后挂载时据此决定要不要显示加载遮罩。 */
 			loadedUrl: null,
 			onLoad: null,
 		};
@@ -1021,11 +268,12 @@ const CSS = `
 		function ensureFrameHost() {
 			if (frameHost.el && frameHost.el.isConnected) return frameHost.el;
 			const el = document.createElement("div");
-			el.setAttribute("data-semg-frame-host", "");
+			el.setAttribute("data-semgp-frame-host", "");
 			document.body.appendChild(el);
 			frameHost.el = el;
 			frameHost.iframe = null;
 			frameHost.url = null;
+			frameHost.key = null;
 			frameHost.loadedUrl = null;
 			return el;
 		}
@@ -1035,12 +283,21 @@ const CSS = `
 		 *
 		 * **只在 url 真的变了时才换 iframe** —— 换一次就是一次完整重载。
 		 *
-		 * @param onLoad 加载完成回调。它会被记进 frameHost，让**后挂载**的组件也能知道
+		 * @param key 这个 url 属于哪个视图，用于「切回来直接沿用」的判断。
+		 * @param onLoad 加载完成回调。记进 frameHost，让**后挂载**的组件也能知道
 		 *   「这个 url 早就加载好了」；否则切回来会一直卡在加载遮罩上（不会再触发 load）。
 		 */
-		function pointFrameHostAt(url, onLoad) {
+		function pointFrameHostAt(url, key, onLoad) {
 			frameHost.onLoad = onLoad;
-			if (frameHost.url === url && frameHost.iframe) return;
+			// 「已经是这个 url 了」不能只看记录：宿主有可能被外力摘掉（GUI 重挂载、
+			// 别的插件清理 DOM、热更新）。记录说「已经有 iframe 了」而 DOM 里其实没有，
+			// 就会走进这条捷径、空手而归 —— 界面上表现为图永远不出来。所以这里连
+			// 连通性一起验，断了就重建。
+			const alive = Boolean(frameHost.el && frameHost.el.isConnected && frameHost.iframe && frameHost.iframe.isConnected);
+			if (alive && frameHost.url === url) {
+				frameHost.key = key;
+				return;
+			}
 			const host = ensureFrameHost();
 			if (frameHost.iframe) frameHost.iframe.remove();
 			const f = document.createElement("iframe");
@@ -1055,6 +312,7 @@ const CSS = `
 			host.appendChild(f);
 			frameHost.iframe = f;
 			frameHost.url = url;
+			frameHost.key = key;
 			frameHost.loadedUrl = null;
 		}
 
@@ -1063,7 +321,7 @@ const CSS = `
 			if (frameHost.el) frameHost.el.style.display = "none";
 		}
 
-		/** 把宿主摆到占位元素的矩形上。宿主自带 16px 内边距，就是 iframe 四周的留白。 */
+		/** 把宿主摆到占位元素的矩形上。 */
 		function syncFrameHostRect(placeholder) {
 			const host = frameHost.el;
 			if (!host || !placeholder) return;
@@ -1082,26 +340,23 @@ const CSS = `
 		/**
 		 * 图谱视图是个整屏画布，下面压着的那条对话输入框既用不上、又吃掉一百多像素。
 		 * 挂载时给滚动容器打个标记，由 CSS 隐藏输入框：
-		 *   `[data-semg-hide-composer] [data-composer-seat]{display:none}`
+		 *   `[data-semgp-hide-composer] [data-composer-seat]{display:none}`
 		 *
-		 * 用 `data-composer-seat` 这个**稳定属性**定位（它在 ConversationRoot 的 JSX 里
-		 * 是显式写死的），不用哈希类名 —— 那是 module CSS 生成的，DSH 一升级就变。
+		 * 用 `data-composer-seat` 这个**稳定属性**定位（它在核心的 JSX 里显式写死），
+		 * 不用哈希类名 —— 那是 module CSS 生成的，DSH 一升级就变。
 		 *
 		 * 用 display:none 而不是卸载它：输入框连同草稿一起留着，切回「对话」标签草稿还在。
-		 * 核心自己也有类似先例：`[data-phase=settling] .composerSeat{visibility:hidden}`。
 		 */
 		function setComposerHidden(hidden) {
 			try {
-				// 从我们自己这个槽的锚点往上找对话的滚动容器。用 `data-slot` 定位
-				// （槽名是稳定的、核心自己的 CSS 也在用），不猜类名。
 				const anchor = document.querySelector('[data-slot="conversation.view"]');
 				const scroll =
 					anchor && typeof anchor.closest === "function"
 						? anchor.closest("[data-conversation-scroll]")
 						: null;
 				if (!scroll) return false;
-				if (hidden) scroll.setAttribute("data-semg-hide-composer", "");
-				else scroll.removeAttribute("data-semg-hide-composer");
+				if (hidden) scroll.setAttribute("data-semgp-hide-composer", "");
+				else scroll.removeAttribute("data-semgp-hide-composer");
 				return true;
 			} catch {
 				return false;
@@ -1113,11 +368,10 @@ const CSS = `
 		 *
 		 * 组件卸载时 iframe **不动**（还在宿主里），只把宿主藏起来，所以切标签回来是
 		 * 秒开、不会重载。
-		 *
-		 * @param props.url  Explorer 基址（空串则不渲染）
 		 */
 		function ExplorerFrame(props) {
 			const url = props.url || "";
+			const viewKey = props.viewKey || "";
 			// 已经加载过的 url 直接算「加载好了」，否则切回来会卡在遮罩上
 			// （复用的 iframe 不会再触发一次 load 事件）。
 			const [loaded, setLoaded] = useState(() => Boolean(url) && frameHost.loadedUrl === url);
@@ -1129,11 +383,11 @@ const CSS = `
 					hideFrameHost();
 					return;
 				}
-				pointFrameHostAt(url, () => setLoaded(true));
+				pointFrameHostAt(url, viewKey, () => setLoaded(true));
 				syncFrameHostRect(node);
 
 				// 位置跟着占位元素走。ResizeObserver 抓尺寸变化（工具栏换行、窗口变化），
-				// resize/scroll 兜住 observer 覆盖不到的位移（比如对话区滚动）。
+				// resize/scroll 兜住 observer 覆盖不到的位移（对话区滚动）。
 				let ro = null;
 				try {
 					if (typeof ResizeObserver === "function") {
@@ -1160,21 +414,542 @@ const CSS = `
 					frameHost.onLoad = null;
 					hideFrameHost();
 				};
-			}, [url]);
+			}, [url, viewKey]);
 
+			// 返回的是**两个兄弟节点**，不再套一层：外面 GraphView 里那个
+			// [data-semgp-canvas] 已经是定位容器了，这里再套一层同名容器的话，
+			// 内层是个普通 block —— 而它的内容（遮罩 + 占位）全是绝对定位、脱离文档流，
+			// 于是内层高度塌成 0，iframe 宿主跟着变成 0×0，**图根本显示不出来**。
+			// （这个坑是真被 scripts/visual-check.mjs 量出来的，不是推理出来的。）
 			return h(
-				"div",
-				{ className: "semg-viewbody" },
+				react.Fragment,
+				null,
 				loaded
 					? null
 					: h(
 							"div",
-							{ className: "semg-viewload" },
-							h("div", { className: "semg-spin" }),
+							{ "data-semgp-center": "" },
+							h("div", { "data-semgp-spin": "" }),
 							h("span", null, T("state.loading")),
 						),
 				// iframe 不在这里 —— 它在 frameHost 里，这里只是它要覆盖的占位。
-				h("div", { ref: holder, className: "semg-viewholder" }),
+				h("div", { ref: holder, "data-semgp-holder": "" }),
+			);
+		}
+
+		// ───────────────────────────── 小组件 ─────────────────────────────
+
+		/** 工具栏上的一个数字。数字和单位同字号，靠字重区分。 */
+		function Stat(props) {
+			return h("span", null, h("b", null, String(props.value)), " ", props.label);
+		}
+
+		/** 一个按钮（或链接样式的按钮）。 */
+		function Btn(props) {
+			const { children, onClick, disabled, title, href } = props;
+			if (href) {
+				return h(
+					"a",
+					{ "data-semgp-btn": "", href, target: "_blank", rel: "noreferrer", title: title ?? undefined },
+					children,
+				);
+			}
+			return h(
+				"button",
+				{
+					type: "button",
+					"data-semgp-btn": "",
+					onClick,
+					disabled: disabled === true,
+					title: title ?? undefined,
+				},
+				children,
+			);
+		}
+
+		/** 一行「标签 + 数值 + 条形」。 */
+		function CountRow(props) {
+			const { label, value, max, hint } = props;
+			const pct = max > 0 ? Math.max(3, Math.round((value / max) * 100)) : 0;
+			return h(
+				"div",
+				{ "data-semgp-barwrap": "" },
+				h(
+					"div",
+					{ "data-semgp-row": "" },
+					h("span", { className: "n" }, label),
+					h("span", { className: "d" }, hint ?? String(value)),
+				),
+				h("div", { "data-semgp-bar": "", style: { width: pct + "%" } }),
+			);
+		}
+
+		// ───────────────────────────── 分析抽屉 ─────────────────────────────
+
+		const TABS = [
+			["overview", "analysis.overview"],
+			["hubs", "analysis.hubs"],
+			["communities", "analysis.communities"],
+			["decisions", "analysis.decisions"],
+			["timeline", "analysis.timeline"],
+		];
+
+		function AnalysisPane(props) {
+			const { data, tab } = props;
+			if (!data || !data.analysis) {
+				return h("div", { "data-semgp-pane": "" }, h("span", { "data-semgp-muted": "" }, T("state.loading")));
+			}
+			const a = data.analysis;
+
+			if (tab === "overview") {
+				const maxType = Math.max(1, ...a.overview.byType.map((t) => t.count));
+				const card = (key, value) =>
+					h(
+						"div",
+						{ "data-semgp-card": "", key },
+						h("span", { className: "k" }, key),
+						h("span", { className: "v" }, String(value)),
+					);
+				return h(
+					"div",
+					{ "data-semgp-pane": "" },
+					h(
+						"div",
+						{ "data-semgp-grid": "" },
+						card(T("stat.nodes"), a.overview.nodes),
+						card(T("stat.edges"), a.overview.edges),
+						card(T("analysis.components"), a.overview.components),
+						card(T("analysis.isolated"), a.overview.isolated),
+					),
+					h("strong", null, T("analysis.byType")),
+					h(
+						"div",
+						{ "data-semgp-barwrap": "" },
+						a.overview.byType
+							.slice(0, 12)
+							.map((t) => h(CountRow, { key: t.type, label: t.type, value: t.count, max: maxType })),
+					),
+				);
+			}
+
+			if (tab === "hubs") {
+				const list = (title, rows) =>
+					h(
+						"div",
+						{ "data-semgp-barwrap": "", key: title },
+						h("strong", null, title),
+						rows.length === 0
+							? h("span", { "data-semgp-muted": "" }, "—")
+							: rows.map((r) =>
+									h(
+										"div",
+										{ key: title + r.id, "data-semgp-row": "" },
+										h("span", { className: "n" }, r.label),
+										h("span", { className: "t" }, r.type),
+										h("span", { className: "d" }, String(r.degree)),
+									),
+								),
+					);
+				return h(
+					"div",
+					{ "data-semgp-pane": "" },
+					list(T("analysis.byDegree"), a.hubs.byDegree),
+					list(T("analysis.byRank"), a.hubs.byRank),
+				);
+			}
+
+			if (tab === "communities") {
+				if (a.communities.length === 0) {
+					return h("div", { "data-semgp-pane": "" }, h("span", { "data-semgp-muted": "" }, "—"));
+				}
+				return h(
+					"div",
+					{ "data-semgp-pane": "" },
+					a.communities.map((c, i) =>
+						h(
+							"div",
+							{ key: "c" + i, "data-semgp-card": "" },
+							h("span", { className: "k" }, `${T("analysis.members")} · ${c.size}`),
+							h(
+								"div",
+								null,
+								c.members.map((m) =>
+									h("span", { key: m.label, "data-semgp-chip": "" }, `${m.label} · ${m.degree}`),
+								),
+							),
+						),
+					),
+				);
+			}
+
+			if (tab === "decisions") {
+				if (a.decisions.length === 0) {
+					return h(
+						"div",
+						{ "data-semgp-pane": "" },
+						h("span", { "data-semgp-muted": "" }, T("analysis.noDecisions")),
+					);
+				}
+				return h(
+					"div",
+					{ "data-semgp-pane": "" },
+					a.decisions.map((d) =>
+						h(
+							"div",
+							{ key: d.id, "data-semgp-card": "" },
+							h("span", { className: "v" }, d.category),
+							h("span", null, d.outcome),
+							d.scenario ? h("span", { "data-semgp-muted": "" }, d.scenario) : null,
+							d.reasoning ? h("span", { "data-semgp-muted": "" }, d.reasoning) : null,
+							h(
+								"span",
+								{ "data-semgp-muted": "" },
+								[
+									d.maker ? `${T("analysis.maker")}: ${d.maker}` : null,
+									d.confidence === null ? null : `${T("analysis.confidence")}: ${d.confidence}`,
+									d.at ? d.at.slice(0, 16).replace("T", " ") : null,
+								]
+									.filter(Boolean)
+									.join(" · "),
+							),
+							d.entities.length > 0
+								? h(
+										"div",
+										null,
+										d.entities.map((e) => h("span", { key: e.id, "data-semgp-chip": "" }, e.label)),
+									)
+								: null,
+						),
+					),
+				);
+			}
+
+			// 时间线（决策的写入时间，按天）
+			if (a.timeline.length === 0) {
+				return h("div", { "data-semgp-pane": "" }, h("span", { "data-semgp-muted": "" }, T("analysis.noDecisions")));
+			}
+			const max = Math.max(...a.timeline.map((t) => t.count));
+			return h(
+				"div",
+				{ "data-semgp-pane": "" },
+				h(
+					"div",
+					{ "data-semgp-barwrap": "" },
+					a.timeline.map((t) => h(CountRow, { key: t.day, label: t.day, value: t.count, max })),
+				),
+			);
+		}
+
+		// ───────────────────────────── 面板 ─────────────────────────────
+
+		/**
+		 * 「知识图谱」视图。
+		 *
+		 * @param props.sessionId 当前会话 id（核心直接给，见 conversation.view 的 slot 契约）。
+		 */
+		function GraphView(props) {
+			const sessionId = props.sessionId || "";
+			const [status, setStatus] = useState(null);
+			const [mode, setMode] = useState("conversation");
+			const [view, setView] = useState(null);
+			const [busy, setBusy] = useState(false);
+			const [err, setErr] = useState(null);
+			const [drawer, setDrawer] = useState(false);
+			const [tab, setTab] = useState("overview");
+			const [analysis, setAnalysis] = useState(null);
+			const [analysisErr, setAnalysisErr] = useState(null);
+			const [copied, setCopied] = useState(false);
+
+			const viewKey = mode + ":" + sessionId;
+
+			// —— 状态：图在哪、MCP 配没配、Explorer 依赖齐不齐、可复制的指令 ——
+			useEffect(() => {
+				let alive = true;
+				(async () => {
+					try {
+						const data = await getJson(
+							"/api-semantica/status" + (sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ""),
+						);
+						if (alive) setStatus(data);
+					} catch (e) {
+						if (alive) setStatus({ ok: false, error: String(e?.message ?? e) });
+					}
+				})();
+				return () => {
+					alive = false;
+				};
+			}, [sessionId]);
+
+			/**
+			 * 出图。
+			 *
+			 * 宿主里的 iframe 已经指着**同一个视图**时直接沿用，不再请求一次：切标签回来
+			 * 不该重新拉一遍 Explorer（那样又要等一两秒）。要重来就点「刷新」。
+			 */
+			const open = useCallback(
+				async (force) => {
+					if (!sessionId) {
+						setErr({ code: "no-session", error: "拿不到会话 id" });
+						return;
+					}
+					if (!force && frameHost.key === viewKey && frameHost.url) {
+						setView((prev) => prev ?? { url: frameHost.url, mode, adopted: true });
+						return;
+					}
+					setBusy(true);
+					setErr(null);
+					try {
+						const data = await postJson("/api-semantica/view", { sessionId, mode });
+						if (data.ok === true) {
+							setView(data);
+							setAnalysis(null);
+							setAnalysisErr(null);
+						} else {
+							setView(null);
+							setErr(data);
+						}
+					} catch (e) {
+						setView(null);
+						setErr({ ok: false, error: String(e?.message ?? e) });
+					} finally {
+						setBusy(false);
+					}
+				},
+				[sessionId, mode, viewKey],
+			);
+
+			useEffect(() => {
+				if (!sessionId) return;
+				open(false);
+			}, [sessionId, viewKey, open]);
+
+			// —— 分析：抽屉打开时算一次，切模式/重新出图后重算 ——
+			useEffect(() => {
+				if (!drawer || !sessionId) return;
+				let alive = true;
+				(async () => {
+					try {
+						const data = await postJson("/api-semantica/analysis", { sessionId, mode });
+						if (!alive) return;
+						if (data.ok === true) {
+							setAnalysis(data);
+							setAnalysisErr(null);
+						} else {
+							setAnalysis(null);
+							setAnalysisErr(data);
+						}
+					} catch (e) {
+						if (alive) {
+							setAnalysis(null);
+							setAnalysisErr({ error: String(e?.message ?? e) });
+						}
+					}
+				})();
+				return () => {
+					alive = false;
+				};
+			}, [drawer, sessionId, mode, view]);
+
+			// —— 图谱标签里隐藏对话输入框；离开时恢复并藏掉 iframe 宿主 ——
+			useEffect(() => {
+				setComposerHidden(true);
+				return () => {
+					setComposerHidden(false);
+					hideFrameHost();
+				};
+			}, []);
+
+			const copy = useCallback(async () => {
+				const text = (status && status.instruction) || "";
+				if (!text) return;
+				try {
+					await navigator.clipboard.writeText(text);
+					setCopied(true);
+					setTimeout(() => setCopied(false), 1600);
+				} catch {
+					// 剪贴板不可用（非安全上下文）时把文本留在下面那块 pre 里让用户自己选
+					setCopied(false);
+				}
+			}, [status]);
+
+			const stats = (view && view.stats) || (analysis && analysis.stats) || null;
+			const claim = (view && view.claim) || (analysis && analysis.claim) || null;
+			const kgPath = (status && status.kg && status.kg.path) || "";
+			const instruction = (status && status.instruction) || "";
+			const mcpMissing = Boolean(status && status.mcp && status.mcp.configured === false);
+			const noNodes = Boolean(view && stats && stats.nodes === 0);
+			const statItems = [
+				["stat.nodes", stats ? stats.nodes : null],
+				["stat.edges", stats ? stats.edges : null],
+				["stat.entities", stats ? stats.entities : null],
+				["stat.relations", stats ? stats.relations : null],
+				["stat.decisions", stats ? stats.decisions : null],
+			];
+
+			return h(
+				"div",
+				{ "data-semgp-root": "" },
+
+				// —— 工具栏 ——
+				h(
+					"div",
+					{ "data-semgp-bar": "" },
+					h(
+						"div",
+						{ "data-semgp-seg": "" },
+						h(
+							"button",
+							{ type: "button", "aria-pressed": mode === "conversation", onClick: () => setMode("conversation") },
+							T("mode.conversation"),
+						),
+						h("button", { type: "button", "aria-pressed": mode === "all", onClick: () => setMode("all") }, T("mode.all")),
+					),
+					h(
+						"span",
+						{ "data-semgp-stats": "" },
+						statItems.map(([key, value]) => h(Stat, { key, label: T(key), value: value === null ? "—" : value })),
+					),
+					h("span", { "data-semgp-spacer": "" }),
+					h(Btn, { onClick: () => open(true), disabled: busy }, T("action.refresh")),
+					h(Btn, { onClick: () => setDrawer((v) => !v) }, drawer ? T("analysis.close") : T("action.analysis")),
+					view && view.url ? h(Btn, { href: view.url }, T("action.external")) : null,
+					h(Btn, { onClick: copy, disabled: !instruction }, copied ? T("action.copied") : T("action.copy")),
+				),
+
+				// —— 路径与归属说明 ——
+				h(
+					"div",
+					{ "data-semgp-sub": "" },
+					kgPath ? h("code", { "data-semgp-path": "", title: kgPath }, kgPath) : null,
+					claim
+						? h(
+								"span",
+								{ "data-semgp-muted": "" },
+								[
+									mode === "conversation" ? Tn("state.taggedOnly", claim.tagged) : null,
+									claim.byEntity ? Tn("state.claimByEntity", claim.byEntity) : null,
+									claim.byTime ? Tn("state.claimByTime", claim.byTime) : null,
+									claim.untagged ? Tn("analysis.untaggedNote", claim.untagged) : null,
+								]
+									.filter(Boolean)
+									.join(" · "),
+							)
+						: null,
+					view && view.ms ? h("span", { "data-semgp-muted": "" }, `${view.ms}ms`) : null,
+				),
+
+				mcpMissing ? h("div", { "data-semgp-warn": "" }, T("state.mcpMissing")) : null,
+
+				// —— 主体 ——
+				h(
+					"div",
+					{ "data-semgp-body": "" },
+					h(
+						"div",
+						{ "data-semgp-canvas": "" },
+						// 有一张空图时**不**渲染 Explorer —— 一个空画布什么也不解释，
+						// 而下面那段提示（本对话还没节点 + 怎么让模型写 + 切到全部）
+						// 才是有用的。硬把 iframe 顶上来会把提示盖掉。
+						view && view.url && !noNodes
+							? h(ExplorerFrame, { url: view.url, viewKey })
+							: h(
+									"div",
+									{ "data-semgp-center": "" },
+									busy ? h("div", { "data-semgp-spin": "" }) : null,
+									busy ? h("span", null, T("state.loading")) : null,
+									!busy && err && err.code === "kg-missing" ? h("strong", null, T("state.noKg")) : null,
+									!busy && err && err.code === "kg-missing" ? h("p", null, T("state.noKgHint")) : null,
+									!busy && err && err.code === "kg-missing" && instruction ? h("pre", null, instruction) : null,
+									!busy && err && err.code === "kg-missing"
+										? h(Btn, { onClick: copy }, copied ? T("action.copied") : T("action.copy"))
+										: null,
+									!busy && err && err.code === "explorer-unavailable"
+										? h("strong", null, T("state.explorerMissing"))
+										: null,
+									!busy && err && err.code === "explorer-unavailable" && err.hint
+										? h("p", null, err.hint)
+										: null,
+									!busy && err && !["kg-missing", "explorer-unavailable"].includes(err.code)
+										? h("strong", null, err.error || T("state.emptyHint"))
+										: null,
+									// 「图里有内容、但本对话一个字都没有」——最容易被误读成「图坏了」，
+									// 所以单独给一条不同的提示，并直接给一条出路。
+									!busy && !err && noNodes ? h("strong", null, T("state.noNodes")) : null,
+									!busy && !err && noNodes ? h("p", null, T("state.noNodesHint")) : null,
+									!busy && !err && noNodes ? h(Btn, { onClick: () => setMode("all") }, T("mode.all")) : null,
+									!busy && !err && noNodes && instruction ? h("pre", null, instruction) : null,
+								),
+					),
+
+					drawer
+						? h(
+								"aside",
+								{ "data-semgp-drawer": "" },
+								h(
+									"header",
+									null,
+									h("strong", null, T("analysis.title")),
+									h("span", { "data-semgp-spacer": "" }),
+									analysis && analysis.ms ? h("span", { "data-semgp-muted": "" }, `${analysis.ms}ms`) : null,
+									h(Btn, { onClick: () => setDrawer(false) }, T("analysis.close")),
+								),
+								h(
+									"div",
+									{ "data-semgp-tabs": "" },
+									TABS.map(([id, key]) =>
+										h("button", { key: id, type: "button", "aria-pressed": tab === id, onClick: () => setTab(id) }, T(key)),
+									),
+								),
+								analysisErr
+									? h(
+											"div",
+											{ "data-semgp-pane": "" },
+											h(
+												"span",
+												{ "data-semgp-muted": "" },
+												`${T("analysis.failed")}：${analysisErr.error ?? ""}`,
+											),
+										)
+									: h(AnalysisPane, { data: analysis, tab }),
+							)
+						: null,
+				),
+			);
+		}
+
+		// ───────────────────────── 头部入口按钮 ─────────────────────────
+
+		/**
+		 * 会话标题右侧的「知识图谱」按钮：切到上面那个视图。
+		 *
+		 * 核心**没有**程序化切换视图的 API：`openView` 只作为 conversation.view 组件的
+		 * prop 传给视图自己，头部动作槽拿不到；tab 按钮的 DOM 上也没有 data-id，
+		 * 只有 role=tab 和文字。所以按文字找那个按钮再 click —— 已装插件
+		 * dsh-context 的「跳转到上下文」用的就是同一招。
+		 */
+		function activateViewTab(label) {
+			const tabs = document.querySelectorAll('[role="tablist"] [role="tab"]');
+			for (const t of tabs) {
+				if (t.textContent.trim() !== label) continue;
+				if (t.getAttribute("aria-selected") !== "true") t.click();
+				return true;
+			}
+			return false;
+		}
+
+		function GraphButton(props) {
+			const open = props.openPanel;
+			return h(
+				"button",
+				{
+					type: "button",
+					"data-semgp-btn": "",
+					title: T("action.open"),
+					onClick: () => {
+						if (typeof open === "function") open();
+					},
+				},
+				T("tab.title"),
 			);
 		}
 
@@ -1183,37 +958,27 @@ const CSS = `
 		/**
 		 * 本插件依赖的服务。
 		 *
-		 * 这个数组**不能省**：Cordis 的 ctx 是服务代理，访问未在 inject 里声明的
-		 * 服务属性会直接抛 `cannot get property "x" without inject` —— 插件根本
-		 * 加载不起来（不是降级，是整个条目 apply 失败）。
+		 * 这个数组**不能省**：Cordis 的 ctx 是服务代理，访问未在 inject 里声明的服务属性
+		 * 会直接抛 `cannot get property "x" without inject` —— 插件根本加载不起来
+		 * （不是降级，是整个条目 apply 失败）。
 		 *
-		 * 这里需要的两个：
 		 *   slots  —— ctx.slots.inject / register，注册对话视图 tab 与头部按钮
-		 *   locale —— 取当前语言决定用中文还是英文字典。注意快照上的字段是
-		 *             **active**（不是 language/locale），详见下面 rebind 的注释
-		 *
-		 * 注：**没有 betterSidebar**。面板住在对话自己的 tab 栏里
-		 * （conversation.view 槽，核心包提供），所以这个插件不依赖任何
-		 * 第三方侧边栏插件。
+		 *   locale —— 取当前语言决定用中文还是英文字典。注意快照上的字段是 **active**
 		 */
 		const inject = ["slots", "locale"];
 
 		function apply(ctx) {
-			// 绑定语言：locale 变化时换字典并重渲染
+			// 绑定语言：locale 变化时换字典并重渲染。
 			//
-			// 这里踩过一个坑，值得写清楚：locale 服务**没有 current() 方法**，
-			// 快照上的字段也不叫 language / locale —— 它叫 **active**：
-			//   dsh-client-locale 的 publish() → Object.freeze({ active, locales, revision })
+			// 这里踩过一个坑：locale 服务**没有 current() 方法**，快照上的字段也不叫
+			// language / locale —— 它叫 **active**
+			// （dsh-client-locale 的 publish() → Object.freeze({ active, locales, revision })）。
 			// 早先按 current()/language 去读，两处都取不到，lang 恒为 undefined，
-			// 于是字典永远落到 en —— 中文界面下控制面板一直显示英文。
-			// `locale/change` 事件本身是存在的（同一个 publish 里 ctx.emit），
-			// 所以监听那行没问题，只有取值方式错了。
-			let bound = false;
+			// 于是字典永远落到 en —— 中文界面下一直显示英文。
 			function currentLangId() {
 				try {
 					const loc = ctx.get("locale");
 					if (loc) {
-						// getLocale() / getSnapshot() 给快照；兼容直接给字符串的实现
 						const snap =
 							typeof loc.getLocale === "function"
 								? loc.getLocale()
@@ -1221,18 +986,14 @@ const CSS = `
 									? loc.getSnapshot()
 									: loc;
 						if (typeof snap === "string") return snap;
-						// active 是官方字段；其余几个只是不同版本的兜底
 						const id = snap && (snap.active ?? snap.language ?? snap.locale ?? snap.id);
 						if (typeof id === "string" && id) return id;
 					}
 				} catch {
-					// 落到下面的浏览器兜底
+					// 落到浏览器兜底
 				}
-				// 服务取不到时按浏览器语言猜 —— 总比把中文用户送进英文字典强
 				try {
-					if (typeof navigator !== "undefined" && navigator.language) {
-						return navigator.language;
-					}
+					if (typeof navigator !== "undefined" && navigator.language) return navigator.language;
 				} catch {
 					// 忽略
 				}
@@ -1241,45 +1002,13 @@ const CSS = `
 			function rebind() {
 				const id = String(currentLangId()).toLowerCase();
 				dict = id.startsWith("zh") ? zh : en;
-				bound = true;
 			}
 			rebind();
 			ctx.on("locale/change", rebind);
 
-			// —— 视图注册 ——
-			//
-			// 面板挂在**对话自己的 tab 栏**里（对话 / 轨迹 / 上下文 / 知识图谱），由核心包
-			// dsh-client-ui-conversation 提供的 conversation.view 这个 list 槽承载：
-			// client-ui-chat 用它注册「对话」(order 0)、client-ui-trajectory 注册「轨迹」
-			// (order 10)，已装插件 dsh-context 注册「上下文」(order 20)。我们排 30。
-			//
-			// 走这条路之后**完全不需要 better-sidebar**：面板住在对话视图区（.viewArea
-			// 是 flex:1 的整个对话区），不再挤在 640px 的侧边栏里，所以那套「打开时自动
-			// 把面板加宽到 640px」的逻辑也一并删了 —— 前提消失了。
-			const VIEW_ID = "semantica-graph";
+			ensureStyles();
 
-			/**
-			 * 把对话切到本插件的视图（给头部按钮用）。
-			 *
-			 * 核心**没有**程序化切换视图的 API：`openView` 只作为 conversation.view 组件的
-			 * prop 传给视图自己，头部动作槽拿不到；tab 按钮的 DOM 上也没有 data-id，只有
-			 * role=tab 和文字。所以只能按文字找那个按钮再 click。
-			 *
-			 * 这不是我偷懒 —— 已装插件 dsh-context 的「跳转到上下文」按钮用的就是同一招
-			 * （它的 activateContextTab 同样是 querySelectorAll('button[role="tab"]')
-			 * 按 textContent 匹配）。生态里没有更干净的入口。
-			 *
-			 * 找不到就返回 false：空会话的 hero 态没有 tab 栏，点了本来就无处可去。
-			 */
-			function activateViewTab(label) {
-				const tabs = document.querySelectorAll('[role="tablist"] [role="tab"]');
-				for (const tab of tabs) {
-					if (tab.textContent.trim() !== label) continue;
-					if (tab.getAttribute("aria-selected") !== "true") tab.click();
-					return true;
-				}
-				return false;
-			}
+			const VIEW_ID = "semantica-graph";
 
 			// 1) 对话视图 tab —— 本插件的主界面
 			ctx.slots.inject("conversation.view", () =>
@@ -1289,18 +1018,14 @@ const CSS = `
 						id: VIEW_ID,
 						order: 30,
 						locale: NS,
-						// thunk：resolveSlotLabel 每次投影都重新求值，所以切语言时
-						// tab 文字跟着变（T 读的是可变 dict）。
+						// thunk：resolveSlotLabel 每次投影都重新求值，所以切语言时 tab 文字跟着变
 						label: () => T("tab.title"),
 					},
-					LauncherView,
+					GraphView,
 				),
 			);
 
 			// 2) 头部动作按钮：切到上面那个 tab
-			//
-			// 位置在会话标题右侧，保留它是因为「点标题旁的图谱按钮」是主人熟悉的入口，
-			// 也写在 README 里；它现在不再是「打开侧边栏」而是「切到知识图谱 tab」。
 			ctx.slots.inject("conversation.session.header.actions", () =>
 				ctx.slots.register(
 					{
@@ -1315,14 +1040,6 @@ const CSS = `
 					GraphButton,
 				),
 			);
-
-			// 3) sessions（只用来在新对话建好后跳过去）
-			//
-			// 延迟注入：它是可选服务，缺席时不应该拦下整个插件。拿不到就只是不自动跳转。
-			ctx.inject(["sessions"], (sctx) => {
-				const svc = sctx.get("sessions");
-				if (svc && typeof svc.open === "function") sessionsSvc = svc;
-			});
 		}
 
 		exports.apply = apply;

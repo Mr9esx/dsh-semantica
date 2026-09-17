@@ -1,313 +1,349 @@
-// src/explorer.js — 常驻管理 semantica 自带的 Knowledge Explorer 子进程。
+// src/explorer.js
 //
-// 为什么用它而不是自绘：semantica 自带的 Explorer 是一条完整的 Web 应用
-// （6 个 workspace、78 个 /api 路由：分析、检索、路径、决策链、语义邻域、
-// 距离矩阵、出处、本体…）。插件自己画图只能覆盖其中一个视图，所以这边只负责
-// 「把图喂给它 + 把它拉起来 + 告诉宿主 URL」，界面完全交给上游。
+// semantica 自带的 Knowledge Explorer —— 插件用它来**展示**图。
 //
-// 一个会话一个进程：`semantica-explorer` 的 `--graph` 只在启动时读一次，
-// 换会话就得换进程。进程按会话缓存、空闲回收，并设总量上限防止泄漏。
+// 面板里那张图不是插件画的，是上游一个完整的 Web 应用（FastAPI + React，多个
+// workspace + 几十个 /api 路由）。插件只负责把它拉起来、把 URL 交给浏览器半侧去
+// 内嵌。所以这里要做的事情很具体：
+//
+//   · 找到能 `python -m semantica.explorer` 的解释器（插件 venv）
+//   · 分配一个空闲端口、把图文件喂给它、等它真的能服务
+//   · 起不来的时候说清是哪一步坏了（缺 fastapi/uvicorn、缺 semantica、还是解释器
+//     不对）—— 这三种在面板上给的提示完全不同
+//
+// 一个视图一个进程：`--graph` 只在启动时读一次，所以图变了必须重启进程，「刷新」
+// 就是这个语义。进程按空闲时间回收，不会越开越多。
 
 import { spawn } from 'node:child_process'
-import { createServer } from 'node:net'
 import { existsSync } from 'node:fs'
-import { resolvePython } from './semantica-bridge.js'
+import { createServer } from 'node:net'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 
-/** 找操作系统要一个空闲端口。 */
-function freePort() {
-  return new Promise((resolve, reject) => {
-    const srv = createServer()
-    srv.unref()
-    srv.on('error', reject)
-    srv.listen(0, '127.0.0.1', () => {
-      const { port } = srv.address()
-      srv.close(() => resolve(port))
-    })
-  })
-}
+/** 起进程到能服务的最长等待。冷启动要拉 spaCy，实测 1–3s，给足余量。 */
+const READY_TIMEOUT_MS = 30_000
 
-const DEFAULT_IDLE_MS = 10 * 60 * 1000
+/** 空闲多久回收一个 Explorer 进程。 */
+const IDLE_MS = 10 * 60 * 1000
+
+/** 同时最多留几个进程。 */
 const MAX_INSTANCES = 3
-const READY_TIMEOUT_MS = 60_000
+
+/** 子进程日志最多留几行（出错时拼进提示）。 */
 const LAST_LOG_LINES = 40
 
-/** 缓存的依赖探测结果。 */
-let explorerProbe = null
+/** 本文件所在的插件目录。 */
+const HERE = new URL('.', import.meta.url).pathname
 
 /**
- * 探测 Explorer 的依赖是否就绪。
+ * 找到带 semantica 的解释器。
  *
- * Explorer 是 semantica 的可选 extra —— 裸 `pip install semantica` 不会带
- * fastapi / uvicorn。缺了的话 `semantica-explorer` 会直接退出，报错也晦涩，
- * 所以在 status 里先探一次，好给用户一句明确的话。
- *
- * @returns {Promise<{ok, python, missing, error}>}
+ * 顺序：显式环境变量 → harness 下的插件 venv（安装脚本建的那个）→ 插件目录里的
+ * .venv → 系统 python3。前两个是设计路径，后两个是兜底。
  */
-export function probeExplorer({ force = false } = {}) {
-  if (!force && explorerProbe) return explorerProbe
-  explorerProbe = new Promise((resolve) => {
-    const python = resolvePython()
-    const child = spawn(
-      python,
-      ['-c', 'import uvicorn, fastapi, semantica.explorer; print("ok")'],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
-    )
-    let out = ''
-    let err = ''
-    child.stdout.on('data', (b) => {
-      out += String(b)
-    })
-    child.stderr.on('data', (b) => {
-      err += String(b)
-    })
-    const timer = setTimeout(() => {
-      try {
-        child.kill('SIGKILL')
-      } catch {
-        /* ignore */
-      }
-    }, 30_000)
-    timer.unref?.()
-    child.on('error', (e) => {
-      clearTimeout(timer)
-      resolve({ ok: false, python, missing: null, error: String(e?.message ?? e) })
-    })
-    child.on('exit', (code) => {
-      clearTimeout(timer)
-      if (code === 0 && out.includes('ok')) {
-        resolve({ ok: true, python, missing: null, error: null })
-        return
-      }
-      const m = /No module named ['"]?([\w.]+)/.exec(err)
-      resolve({
-        ok: false,
-        python,
-        missing: m ? m[1] : null,
-        error: err.trim().split('\n').slice(-1)[0] || `退出码 ${code}`,
-      })
-    })
-  })
-  return explorerProbe
+export function resolvePython() {
+	const explicit = process.env.DSH_SEMANTICA_PYTHON || process.env.DSH_SEMANTICA_PYTHON3
+	if (explicit) return explicit
+
+	const home =
+		process.env.DSH_HOME || join(homedir(), 'Library', 'Application Support', 'dsh-desktop', 'harness')
+	const candidates = [
+		join(home, 'semantica-venv', 'bin', 'python'),
+		join(home, '.dsh', 'semantica-venv', 'bin', 'python'),
+		join(HERE, '..', '.venv', 'bin', 'python'),
+	]
+	for (const c of candidates) {
+		try {
+			if (existsSync(c)) return c
+		} catch {
+			// 候选路径不存在就是没装，看下一个
+		}
+	}
+	return 'python3'
 }
 
+/**
+ * 探测解释器里有没有 semantica、有没有 Explorer 那套依赖。
+ *
+ * 结果缓存 —— 面板每次打开都跑一遍 `import semantica` 要好几秒，没必要。
+ *
+ * @param opts.force 忽略缓存重探。
+ * @returns `{ ok, python, version, missing, error, hint }`
+ */
+export function probeExplorer({ force = false } = {}) {
+	if (!force && probeCache) return probeCache
+	const python = resolvePython()
+	probeCache = new Promise((resolve) => {
+		const script = [
+			'import json,sys',
+			'out={"semantica":None,"explorer":None}',
+			'try:',
+			'    import semantica; out["semantica"]=getattr(semantica,"__version__","unknown")',
+			'except Exception as e: out["semantica"]="ERR:"+repr(e)',
+			'try:',
+			'    import fastapi, uvicorn; out["explorer"]="ok"',
+			'except Exception as e: out["explorer"]="ERR:"+repr(e)',
+			'sys.stdout.write(json.dumps(out))',
+		].join('\n')
+		let child
+		try {
+			child = spawn(python, ['-c', script], { stdio: ['ignore', 'pipe', 'pipe'] })
+		} catch (err) {
+			resolve({
+				ok: false,
+				python,
+				error: String(err?.message ?? err),
+				hint: '解释器都起不来，检查 DSH_SEMANTICA_PYTHON。',
+			})
+			return
+		}
+		let out = ''
+		let err = ''
+		child.stdout.on('data', (b) => {
+			out += String(b)
+		})
+		child.stderr.on('data', (b) => {
+			err += String(b)
+		})
+		const timer = setTimeout(() => {
+			try {
+				child.kill('SIGKILL')
+			} catch {
+				// 已经结束
+			}
+		}, 20_000)
+		child.on('error', (e) => {
+			clearTimeout(timer)
+			resolve({
+				ok: false,
+				python,
+				error: String(e?.message ?? e),
+				hint: '解释器路径不对，或者没有执行权限。',
+			})
+		})
+		child.on('close', () => {
+			clearTimeout(timer)
+			let parsed = null
+			try {
+				parsed = JSON.parse(out.trim())
+			} catch {
+				parsed = null
+			}
+			if (!parsed) {
+				resolve({
+					ok: false,
+					python,
+					error: err.trim() || '解释器没有返回预期结果',
+					hint: `用这个解释器装一次 semantica：${python} -m pip install semantica`,
+				})
+				return
+			}
+			const hasSemantica = typeof parsed.semantica === 'string' && !parsed.semantica.startsWith('ERR:')
+			const hasExplorer = parsed.explorer === 'ok'
+			resolve({
+				ok: hasSemantica && hasExplorer,
+				python,
+				version: hasSemantica ? parsed.semantica : null,
+				missing: [!hasSemantica ? 'semantica' : null, !hasExplorer ? 'explorer 依赖' : null].filter(Boolean),
+				error: hasSemantica ? (hasExplorer ? null : parsed.explorer) : parsed.semantica,
+				hint: hasSemantica
+					? hasExplorer
+						? null
+						: `缺 Explorer 依赖，用插件那个解释器装一次：${python} -m pip install "semantica[explorer]"`
+					: `这个解释器里没有 semantica：${python}`,
+			})
+		})
+	})
+	return probeCache
+}
+
+/** 探测结果缓存（probeExplorer 用）。 */
+let probeCache = null
+
+/** 要一个空闲端口。交给系统分配，避免自己猜端口撞车。 */
+function freePort() {
+	return new Promise((resolve, reject) => {
+		const srv = createServer()
+		srv.unref()
+		srv.on('error', reject)
+		srv.listen(0, '127.0.0.1', () => {
+			const addr = srv.address()
+			const port = typeof addr === 'object' && addr ? addr.port : 0
+			srv.close(() => (port ? resolve(port) : reject(new Error('拿不到空闲端口'))))
+		})
+	})
+}
+
+/** 探一下 Explorer 的 health。 */
+async function healthy(url) {
+	try {
+		const ctrl = new AbortController()
+		const timer = setTimeout(() => ctrl.abort(), 3000)
+		const res = await fetch(`${url}/api/health`, { signal: ctrl.signal })
+		clearTimeout(timer)
+		return res.ok
+	} catch {
+		return false
+	}
+}
+
+/** 把子进程日志翻译成一句人话。 */
+function diagnose(log) {
+	const joined = log.join('\n')
+	if (/No module named ['"]?uvicorn|No module named ['"]?fastapi/.test(joined)) {
+		return '看起来缺 Explorer 依赖：pip install "semantica[explorer]"。'
+	}
+	if (/No module named ['"]?semantica/.test(joined)) {
+		return '这个解释器里没有 semantica。'
+	}
+	const tail = log.slice(-6).join(' | ')
+	return tail ? `最近输出：${tail}` : '（子进程没有任何输出）'
+}
+
+/**
+ * 管着一堆 Explorer 子进程，一个「视图 key」一个。
+ *
+ * key 由调用方给（`conversation:<会话id>` / `all`）：同一个 key 再打开时旧进程会被
+ * 换掉，因为图文件重写了、而 `--graph` 只在启动时读一次。
+ */
 export class ExplorerHost {
-  /**
-   * @param opts.idleMs 空闲多久回收进程
-   * @param opts.maxInstances 同时保留的进程上限（按最近使用淘汰）
-   * @param opts.onLog 诊断日志回调
-   */
-  constructor(opts = {}) {
-    this.idleMs = opts.idleMs ?? DEFAULT_IDLE_MS
-    this.maxInstances = opts.maxInstances ?? MAX_INSTANCES
-    this.onLog = opts.onLog ?? (() => {})
-    /** @type {Map<string, {child, port, url, signature, graphPath, lastUsed, log}>} */
-    this.instances = new Map()
-    this.disposed = false
-  }
+	/** @param opts.logger 宿主日志（可选）。 */
+	constructor(opts = {}) {
+		this.instances = new Map()
+		this.logger = opts.logger ?? null
+		this.timer = setInterval(() => this.#reap(), 30_000)
+		this.timer.unref?.()
+	}
 
-  /**
-   * 确保某个会话的 Explorer 可用。
-   *
-   * @param sessionId 会话 id
-   * @param graphPath ContextGraph JSON 的落盘路径
-   * @param signature 图内容的签名（会话事件数）：变了就重启进程重新载图
-   * @returns {Promise<{url, port, reused, log}>}
-   */
-  async ensure(sessionId, graphPath, signature) {
-    if (this.disposed) throw new Error('ExplorerHost 已释放')
+	/**
+	 * 给某个 key 起（或重启）一个 Explorer。
+	 *
+	 * @param key 视图标识。
+	 * @param graphPath 图文件路径。
+	 * @returns `{ url, port }`
+	 */
+	async start(key, graphPath) {
+		if (!existsSync(graphPath)) throw new Error(`图文件不存在：${graphPath}`)
+		if (this.instances.has(key)) this.#kill(key)
 
-    const existing = this.instances.get(sessionId)
-    if (existing && existing.signature === signature && existing.graphPath === graphPath) {
-      if (await this.#healthy(existing.url)) {
-        existing.lastUsed = Date.now()
-        return { url: existing.url, port: existing.port, reused: true, log: existing.log }
-      }
-      // 进程还活着但服务没了 —— 当成坏的，下面重起
-      this.#kill(sessionId)
-    } else if (existing) {
-      this.#kill(sessionId)
-    }
+		const python = resolvePython()
+		const port = await freePort()
+		const child = spawn(
+			python,
+			[
+				'-m', 'semantica.explorer',
+				'--graph', graphPath,
+				'--port', String(port),
+				'--host', '127.0.0.1',
+				'--no-browser',
+			],
+			{
+				stdio: ['ignore', 'pipe', 'pipe'],
+				env: {
+					...process.env,
+					// Explorer 默认要 SEMANTICA_API_KEY，否则受保护路由返回 503。
+					// 它只绑 127.0.0.1，喂进去的是用户自己的图，所以开上游给的那个
+					// 「显式选择无需认证」开关。
+					SEMANTICA_ALLOW_ANONYMOUS: 'true',
+				},
+			},
+		)
+		child.unref?.()
 
-    this.#reap()
-    const inst = await this.#spawn(graphPath)
+		const log = []
+		const capture = (buf) => {
+			for (const line of String(buf).split('\n')) {
+				const t = line.trim()
+				if (!t) continue
+				log.push(t)
+				if (log.length > LAST_LOG_LINES) log.shift()
+			}
+		}
+		child.stdout.on('data', capture)
+		child.stderr.on('data', capture)
 
-    // 图换了、或本来就没起来：登记进来
-    this.instances.set(sessionId, {
-      ...inst,
-      signature,
-      graphPath,
-      lastUsed: Date.now(),
-      log: inst.log,
-    })
-    this.#reap()
-    return { url: inst.url, port: inst.port, reused: false, log: inst.log }
-  }
+		let exitInfo = null
+		child.on('exit', (code, signal) => {
+			exitInfo = { code, signal }
+		})
 
-  /** 起一个 semantica-explorer 子进程并等它可服务。 */
-  async #spawn(graphPath) {
-    if (!existsSync(graphPath)) {
-      throw new Error(`图文件不存在：${graphPath}`)
-    }
-    const python = resolvePython()
-    const port = await freePort()
+		const url = `http://127.0.0.1:${port}`
+		const deadline = Date.now() + READY_TIMEOUT_MS
+		while (Date.now() < deadline) {
+			if (exitInfo) {
+				throw new Error(
+					`Explorer 启动即退出（code=${exitInfo.code} signal=${exitInfo.signal}）。${diagnose(log)}`,
+				)
+			}
+			if (await healthy(url)) {
+				this.instances.set(key, { child, url, port, log, lastUsed: Date.now(), graphPath })
+				this.#enforceCap()
+				return { url, port }
+			}
+			await new Promise((r) => setTimeout(r, 300))
+		}
+		try {
+			child.kill('SIGKILL')
+		} catch {
+			// 已经死了
+		}
+		throw new Error(`Explorer 在 ${READY_TIMEOUT_MS / 1000}s 内没有就绪。${diagnose(log)}`)
+	}
 
-    const child = spawn(
-      python,
-      [
-        '-m', 'semantica.explorer',
-        '--graph', graphPath,
-        '--port', String(port),
-        '--host', '127.0.0.1',
-        '--no-browser',
-      ],
-      {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: {
-          ...process.env,
-          // Explorer 默认要求 SEMANTICA_API_KEY，否则所有受保护路由返回 503。
-          // 它只绑在 127.0.0.1，且喂进去的是用户自己的对话图，所以走上游给
-          // 的「显式选择无需认证」开关（开发用途）。绑非回环地址时不会这么做。
-          SEMANTICA_ALLOW_ANONYMOUS: 'true',
-        },
-      },
-    )
-    child.unref?.()
+	/** 某个 key 的进程还活着吗（面板用它决定要不要重新拉）。 */
+	isLive(key) {
+		return this.instances.has(key)
+	}
 
-    const log = []
-    const capture = (buf) => {
-      for (const line of String(buf).split('\n')) {
-        const t = line.trim()
-        if (!t) continue
-        log.push(t)
-        if (log.length > LAST_LOG_LINES) log.shift()
-      }
-    }
-    child.stdout.on('data', capture)
-    child.stderr.on('data', capture)
+	/** 当前跑着哪些（诊断用）。 */
+	snapshot() {
+		return [...this.instances.entries()].map(([key, inst]) => ({
+			key,
+			url: inst.url,
+			port: inst.port,
+			idleMs: Date.now() - inst.lastUsed,
+		}))
+	}
 
-    let exitInfo = null
-    child.on('exit', (code, signal) => {
-      exitInfo = { code, signal }
-    })
+	/** 全部收掉（插件卸载时调）。 */
+	dispose() {
+		clearInterval(this.timer)
+		for (const key of [...this.instances.keys()]) this.#kill(key)
+	}
 
-    const url = `http://127.0.0.1:${port}`
-    const deadline = Date.now() + READY_TIMEOUT_MS
-    while (Date.now() < deadline) {
-      if (exitInfo) {
-        throw new Error(
-          `semantica-explorer 启动即退出（code=${exitInfo.code} signal=${exitInfo.signal}）。` +
-            `${this.#diagnose(log)}`,
-        )
-      }
-      if (await this.#healthy(url)) {
-        return { child, port, url, log }
-      }
-      await new Promise((r) => setTimeout(r, 300))
-    }
+	/** 超量的先杀最久没用的。 */
+	#enforceCap() {
+		if (this.instances.size <= MAX_INSTANCES) return
+		const byAge = [...this.instances.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed)
+		for (const [key] of byAge.slice(0, this.instances.size - MAX_INSTANCES)) this.#kill(key)
+	}
 
-    try {
-      child.kill('SIGKILL')
-    } catch {
-      /* 已经死了 */
-    }
-    throw new Error(`semantica-explorer 在 ${READY_TIMEOUT_MS / 1000}s 内没有就绪。`)
-  }
+	/** 空闲回收。 */
+	#reap() {
+		const now = Date.now()
+		for (const [key, inst] of [...this.instances.entries()]) {
+			if (now - inst.lastUsed > IDLE_MS) this.#kill(key)
+		}
+	}
 
-  /** 把子进程的输出翻译成一句人话。 */
-  #diagnose(log) {
-    const joined = log.join('\n')
-    if (/No module named ['"]?uvicorn|No module named ['"]?fastapi/.test(joined)) {
-      return (
-        '看起来缺 Explorer 依赖。用插件 venv 装一次：' +
-        '`pip install "semantica[explorer]"`（需要 fastapi + uvicorn）。'
-      )
-    }
-    if (/No module named ['"]?semantica/.test(joined)) {
-      return '这个解释器里没有 semantica —— 检查 DSH_SEMANTICA_PYTHON 或 venv 路径。'
-    }
-    const tail = log.slice(-6).join(' | ')
-    return tail ? `最近输出：${tail}` : '（子进程没有输出任何日志）'
-  }
-
-  /** 探测 /api/health。 */
-  async #healthy(url) {
-    try {
-      const ctrl = new AbortController()
-      const timer = setTimeout(() => ctrl.abort(), 3000)
-      const res = await fetch(`${url}/api/health`, { signal: ctrl.signal })
-      clearTimeout(timer)
-      return res.ok
-    } catch {
-      return false
-    }
-  }
-
-  /** 杀掉某个会话的实例。 */
-  #kill(sessionId) {
-    const inst = this.instances.get(sessionId)
-    if (!inst) return
-    this.instances.delete(sessionId)
-    try {
-      inst.child.kill('SIGTERM')
-      // 给它一点时间自己退；不退就强杀，避免留下孤儿进程
-      const t = setTimeout(() => {
-        try {
-          inst.child.kill('SIGKILL')
-        } catch {
-          /* ignore */
-        }
-      }, 4000)
-      t.unref?.()
-    } catch {
-      /* ignore */
-    }
-  }
-
-  /** 总量上限 + 空闲回收。 */
-  #reap() {
-    const now = Date.now()
-    for (const [sid, inst] of this.instances) {
-      if (now - inst.lastUsed > this.idleMs) this.#kill(sid)
-    }
-    if (this.instances.size < this.maxInstances) return
-    // 超上限：淘汰最久未用的（保留刚好 maxInstances 个）
-    const byAge = [...this.instances.entries()].sort((a, b) => a[1].lastUsed - b[1].lastUsed)
-    while (byAge.length >= this.maxInstances) {
-      const [sid] = byAge.shift()
-      this.#kill(sid)
-      this.onLog(`explorer: 淘汰长时间未用的实例 ${sid}`)
-    }
-  }
-
-  /** 当前活着的实例快照，给 status 用。 */
-  snapshot() {
-    return [...this.instances.entries()].map(([sessionId, inst]) => ({
-      sessionId,
-      url: inst.url,
-      port: inst.port,
-      idleMs: Date.now() - inst.lastUsed,
-    }))
-  }
-
-  /**
-   * 取某个会话正在跑的实例（不校验签名）。
-   *
-   * 用途是快路径：会话一直在增长，签名几乎每次点击都不同，但重抽一张图要 20s+。
-   * 所以只要进程还活着就先复用它、把 URL 直接给出去，过期与否交给调用方标注，
-   * 由用户显式刷新决定要不要重抽。
-   *
-   * @returns {{url, port, signature}|null}
-   */
-  running(sessionId) {
-    const inst = this.instances.get(sessionId)
-    if (!inst) return null
-    inst.lastUsed = Date.now()
-    return { url: inst.url, port: inst.port, signature: inst.signature }
-  }
-
-  /** 关掉全部实例。 */
-  dispose() {
-    this.disposed = true
-    for (const sid of [...this.instances.keys()]) this.#kill(sid)
-  }
+	/** 杀进程（SIGTERM → 3s 后 SIGKILL）。 */
+	#kill(key) {
+		const inst = this.instances.get(key)
+		if (!inst) return
+		this.instances.delete(key)
+		try {
+			inst.child.kill('SIGTERM')
+		} catch {
+			// 已经不在了
+		}
+		const t = setTimeout(() => {
+			try {
+				inst.child.kill('SIGKILL')
+			} catch {
+				// 同上
+			}
+		}, 3000)
+		t.unref?.()
+		this.logger?.debug?.(`semantica-graph: 回收 Explorer ${key}`)
+	}
 }

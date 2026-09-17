@@ -1,154 +1,196 @@
-# dsh\-semantica\-graph 插件介绍
+# dsh-semantica-graph
 
-这是一款 DSH 专属插件，核心作用是**把你的 AI 对话内容自动生成可视化知识图谱**，依托开源工具 Semantica 实现完整图谱能力，支持原生图谱浏览器查看、对话决策链追溯、AI 智能分析图谱等功能。
+在 DSH Desktop 里看当前对话的**知识图谱**。
 
-## 一、项目底层依托
+三件事各归各家，这一版是围绕这个分工重写的：
 
-本插件**基于官方 Semantica 原生开发**（Python 知识图谱开源框架），并非自研复刻：
+| 环节 | 谁做 | 怎么做的 |
+| --- | --- | --- |
+| **提取** | 模型 | 调用上游 `mcp__semantica__*` MCP 工具，把对话抽成实体/关系/决策写进图 |
+| **展示** | 上游 semantica | 自带的 Knowledge Explorer（完整 Web 应用），插件把它内嵌在对话标签页里 |
+| **分析** | 这个插件 | `src/kg.js` 里直接算：枢纽、社区、决策清单、时间线；不调 AI、不开新对话 |
 
-- 直接调用 Semantica 官方核心能力：实体识别、关系抽取、图谱构建、可视化浏览器（Knowledge Explorer）
+为什么必须这么分：**对话内容只有模型手里有**，插件拿不到（去读会话日志也只是二手转录，
+而且插件改不了 DSH 的 LLM 代码 —— 它就是个插件）。所以提取只能由模型按规则调 MCP 工具
+完成；插件负责的是「告诉模型怎么写」，以及「把写出来的东西展示好、分析好」。
 
-- 完全复用官方全套能力：22 组命令工具、78 个 REST 接口、6 大可视化工作区
+---
 
-- 图谱界面 100% 为 Semantica 原版，插件不做自定义绘制，全程同步官方所有功能
+## 一、写入通道：一条 profile 配置 + 一段系统提示词
 
-插件仅做适配层工作：读取 DSH 对话数据、清洗过滤无效内容、搭建对话专属图谱、嵌入官方可视化界面。
+### 1.1 MCP 配置
 
-## 二、插件专属新增能力（原生 Semantica 没有）
+`scripts/install.mjs` 会往 `profiles/web/cordis.patch.yml` 里幂等写入这一条（哨兵标记
+圈定，标记之外一个字都不动）：
 
-Semantica 本身无法适配 DSH 对话场景，本插件针对性做了全套优化和定制开发：
-
-- **适配 DSH 会话数据**：解析 DSH 压缩格式的对话日志，还原完整对话轮次、消息、工具调用记录
-
-- **智能过滤无效内容**：自动剔除系统通知、后台日志、模型思考过程、代码块、无效工具文本，避免图谱冗余失真，大幅提升建图速度和精准度
-
-- **双语智能抽取**：自动识别对话中英文占比，中文调用专属模型、英文调用原生模型，解决中英文混聊抽取错乱问题
-
-- **实体类型纠错与噪声拦截**：抽取模型对技术对话的类型判定不可靠（`numpy` 标成「地点」、`白名单` 标成「人名」、`cytoscape` 被切成半个词 `cy` 却成了全图度数第五的实体），插件按实测数据纠正类型并拦掉被切碎的词 —— 术语一个不丢，但类型诚实：代码标识符统一标为 `CODE`，中文词无法判定类型时标为 `UNKNOWN`；图谱里的实体榜因此从「噪声 + 半个词」变成真正在谈的技术名词
-
-- **对话决策链可视化**：解析对话中的人工提问与选项选择，**用 Semantica 自己的决策模型**（`ContextGraph.record_decision`）落成图节点，不是自己拼的字段。所以决策不是一行日志，而是一等公民节点：带上类别、场景、结论、置信度，以及**上游认识的因果关系**（`add_causal_relationship` 的 `INFLUENCED`）—— 这意味着上游的 `query_decisions` / `get_causal_chain` / `find_precedents` 这些接口都能看见它们
-- **决策关联到实体**：每条决策用 `involves` 边连到它真正谈到的实体（按**实体名在决策文本里字面出现**匹配，不用语义相似度——字面出现是事实，相似是猜）。Explorer 决策详情里的因果链卡片因此不再空着
-- **图谱分析落到节点上**：度中心性、特征向量中心性、接近中心性、Louvain 社区归属、连通分量，全部写回节点属性，在图谱浏览器里点开任意节点就能看到，孤岛（连通分量为 1）一眼可见
-
-- **AI 图谱专项分析**：一键新开独立对话，自动注入图谱数据，支持复盘对话、解析图谱、校验抽取质量、生成任务建议，不占用当前对话上下文
-
-- **本地化适配优化**：修复时区、字符兼容、页面渲染问题，适配 DSH 对话视图区
-
-## 二·五、声明通道：让 AI 自己记决策（可选）
-
-上面的决策来自对话里结构化的提问记录 —— 那记的是**用户确认过的选择**。
-**AI 自己做的决策**埋在自然语言和思考过程里，事后反推不可靠，只有让它在做事的当下
-主动声明才准。上游 [Semantica](https://github.com/semantica-agi/semantica) 推荐的正是
-这条路（MCP 优先），它的 `semantica-mcp` 提供 15 个工具：`record_decision`、
-`find_precedents`、`get_causal_chain`、`add_entity`、`add_relationship`、
-`get_graph_analytics`、`export_graph` 等。
-
-把这条通道接进 DSH 的配置、验证方法，以及它的两个硬限制（子进程环境会被清洗、
-MCP resources 不受支持），见 **[docs/mcp.md](docs/mcp.md)**。
-
-## 三、核心功能
-
-- **对话一键成图**：任意对话点击 **知识图谱** 标签（或标题旁的图谱按钮），自动生成包含节点、实体、关系、工具调用的完整知识图谱，并可在浏览器中打开查看
-
-- **可视化决策追溯**：在图谱浏览器中直观查看对话全程决策逻辑、备选方案、最终选择及因果关联
-
-- **节点详情可读**：点开任意工具节点能看到那次调用**跑了什么命令、输出了什么**（还能直接搜索命令与输出内容）；时间轴上每个实体只在它真正被谈到的那一轮里活跃，不再从头亮到尾
-
-- **智能图谱分析**：四大一键分析功能，新开对话无压力解析图谱，支持深度追问
-
-- **智能缓存更新**：图谱自动缓存，二次打开秒加载；对话更新后自动标记过期，支持一键重新抽取
-
-- **图谱文件可及**：工具栏直接显示图谱 JSON 文件的落盘路径，点一下复制完整路径，可自行用编辑器打开或交给其他工具
-
-- **全宽图谱视图**：面板即一个对话标签页，铺满整个对话区（不再是 640px 的侧边栏），图谱比原来宽一倍以上
-
-- **整屏画布**：进入图谱标签时自动收掉对话输入框，工具栏与图谱是两块同规格的圆角边框卡片（四周 16px 留白、彼此 16px 间距）；工具栏在常规窗口宽度下一行放完（图信息 + 四个分析按钮 + 在浏览器打开）；切到别的标签再切回来，图谱原地不动 —— 不重新抽取、也不重新加载
-
-## 三·五、想深挖的话
-
-| 文档 | 内容 |
-| --- | --- |
-| [docs/decisions-and-analysis.md](docs/decisions-and-analysis.md) | 决策层与图分析具体调了 semantica 哪些接口、为什么、以及**不调某些接口的实测依据**（哪个要 18 秒、哪个在 0.6.8 上是坏的、哪个的返回我们逐字段核对过完全一致） |
-| [docs/mcp.md](docs/mcp.md) | MCP 声明通道的配置与验证 |
-| [docs/graph-quality.md](docs/graph-quality.md) | 实体抽取的噪声分类、拦截规则与前后对比 |
-
-## 四、安装教程（极简版）
-
-### 前置依赖（必须配齐）
-
-- 正常运行的 DSH（桌面端/命令行均可）
-
-- Node\.js ≥22\.19\.0 或 ≥24\.0\.0
-
-- Python ≥3\.8（推荐 3\.12\.7）
-
-- **无需任何第三方插件**：图谱面板直接挂在对话自己的标签栏里（与「对话 / 轨迹 / 上下文」并排），不依赖 dsh\-better\-sidebar
-
-### 步骤1：搭建独立 Python 环境 \& 安装依赖
-
-务必使用独立虚拟环境，避免依赖版本冲突
-
-```Plain Text
-# 自动识别 DSH 路径，创建专属虚拟环境
-DSH_HOME="${DSH_HOME:-$HOME/Library/Application Support/dsh-desktop/harness}"
-[ -d "$DSH_HOME" ] || DSH_HOME="$HOME/.dsh"
-python3 -m venv "$DSH_HOME/semantica-venv"
-
-# 安装带可视化浏览器的完整 Semantica 版本
-"$DSH_HOME/semantica-venv/bin/pip" install -U pip
-"$DSH_HOME/semantica-venv/bin/pip" install "semantica[explorer]"
-
-# 安装中英双语实体识别模型（缺一不可）
-"$DSH_HOME/semantica-venv/bin/python" -m spacy download en_core_web_sm
-"$DSH_HOME/semantica-venv/bin/python" -m spacy download zh_core_web_sm
+```yaml
+- insert:
+    - id: mcp-semantica
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: semantica
+        transport: stdio
+        command: '<harness>/semantica-venv/bin/semantica-mcp'
+        env:
+          SEMANTICA_KG_PATH: '<harness>/dsh-semantica-graph/kg.json'
+        failOnStartupError: false
 ```
 
-### 步骤2：安装插件本体
+两个来自 `dsh-mcp-client` 的硬约束（不是这里的偏好）：
 
-```Plain Text
-# 进入插件目录
-cd /path/to/dsh-semantica-graph
+- 子进程环境**先被清洗**（删掉含 `KEY`/`PASSWORD`/`SECRET`/`TOKEN` 的变量和所有
+  `DSH_*`），所以 `SEMANTICA_KG_PATH` 只能写死绝对路径，别指望继承父进程环境；
+- 只桥接**工具**能力，MCP 的 resources / prompts 不会出现在 DSH 里。
 
-# 安装基础依赖
-npm install
+没有这条配置，模型就没有 `mcp__semantica__*` 工具，图永远是空的 —— 面板会直接把这件事
+写在脸上（黄色横幅）。`/api-semantica/status` 会扫 profile 判断配没配。
 
-# 自动注册插件到 DSH 环境
-node scripts/install.mjs
+### 1.2 提示词：让每一次写入都带上「我在哪个会话」
+
+MCP 那边是**一张全局图**、一个固定路径，`ctx` 里也拿不到按会话插值的环境变量。所以
+「本对话」这一刀不可能按文件切 —— 只能按**写入时打的标**切。而打标要求模型知道自己在
+哪个会话里：
+
+```js
+ctx.systemPrompt.section({ name: 'plugin:semantica-graph', order: 700, text: SECTION_TEXT })
+ctx.systemPrompt.variable('semantica_conversation', (context) => context?.agent?.session?.header?.id)
 ```
 
-### 步骤3：重启生效
+段落正文里写 `{{semantica_conversation}}`，provider 每次组装提示词时求值成当前会话 id。
+于是模型写图时照做：
 
-**完全退出重启 DSH 桌面端**（仅刷新页面不生效，后台路由需重启注册）
-
-### 步骤4：验证安装成功
-
-```Plain Text
-# 查看插件是否被 DSH 识别
-dsh --profile web --dump-config | grep -A 1 semantica
-
-# 校验 Semantica 服务就绪
-curl -s http://127.0.0.1:56020/api-semantica/status
+```jsonc
+add_entity(id, label, type, metadata = { "conversation": "<sessionId>" })
+add_relationship(source, target, type, metadata = { "conversation": "<sessionId>" })
 ```
 
-返回 `ready: true` 即代表安装完成，可正常使用。
+三件工具行为上的坑，都在提示词里明说了：
 
-## 五、基础用法
+- **`record_decision` 不接受 `metadata`** —— 决策节点没法打标。所以指令要求它必须传
+  `entities=[...]`，插件顺着 `involves` 边把决策认领回会话；
+- **中文必须显式传 `model="zh_core_web_sm"`**，否则 spaCy 的英文模型会把整句当成一个实体；
+- 图的归属靠标，标错了就切不出来，所以 `metadata` 的形状写得很死。
 
-打开任意 AI 对话 → 点击顶部的**知识图谱**标签（在「对话 / 轨迹 / 上下文」旁边），或点会话标题右侧的**图谱按钮** → 切换到图谱工作台，等待几秒即可生成完整对话知识图谱。
+不想让每个会话都带这段提示词，可以在插件配置里关：`{ "injectPrompt": false }`
+（面板上的「复制提取指令」按钮仍然可用，那段是渲染好的、带具体会话 id 的指令正文）。
 
-支持重新抽取、在浏览器打开看图、AI 一键分析等所有功能。
+---
 
-## 六、卸载方式
+## 二、怎么切出「本对话」这张图
 
-```Plain Text
-cd /path/to/dsh-semantica-graph
-node scripts/install.mjs --remove
+`src/kg.js` 的 `scopeGraph()`，`mode: 'conversation'` 时：
 
-# 彻底清理环境（可选）
-rm -rf "$DSH_HOME/semantica-venv"
-rm -rf "$DSH_HOME/dsh-semantica-graph"
+1. 留下**打了本会话标**的节点和边；
+2. **决策**走两条认领路：顺着 `involves` 边连到留下来的实体（首选），或者写入时间落在
+   会话的活动窗口里（`createdAt` − 60s → 日志文件 mtime + 60s）；
+3. 决策的附属节点（`category_*` / `maker_*`）跟着进来，否则 Explorer 里那条决策缺一块；
+4. 归档节点（`properties.status === 'archived'`，`delete_node` 是软删）一律不进来。
+
+切不干净的部分**如实报出来**，不假装没有：工具栏底下那行会写「本对话 N 个节点 ·
+按实体边认领 N 条决策 · 按时间认领 N 条决策 · 图里还有 N 个节点没打会话标」。
+`mode: 'all'` 就是整张图，什么都不切。
+
+每张切好的图写成 `<harness>/dsh-semantica-graph/views/view-<key>.json`，再交给 Explorer。
+`semantica.explorer --graph` 是**启动时读一次**，所以图变了就得重启那个子进程 ——
+`ExplorerHost` 按 key 管实例（最多 3 个，闲置 10 分钟回收），点「刷新」就是重建一个。
+
+---
+
+## 三、展示：为什么内嵌上游 Explorer 而不是自己画
+
+Explorer 有多个 workspace、78 个 `/api` 路由。自己画一张图画得出来，但功能上限会低一大截，
+而且上游一升级就得跟着改。所以直接把它嵌进来：
+
+- 子进程 `python -m semantica.explorer --graph <视图文件> --port <随机> --host 127.0.0.1 --no-browser`，
+  只绑回环地址；依赖探测（`import semantica` + `fastapi`/`uvicorn`）失败时给一句人话，不猜；
+- iframe 的 `sandbox` 是 `allow-scripts allow-forms allow-popups allow-downloads
+  allow-modals allow-popups-to-escape-sandbox allow-same-origin`：
+  - `allow-same-origin` **必须有**，否则 iframe 是 opaque origin，React SPA 起不来（白屏）；
+  - 刻意**不含** `allow-top-navigation`，所以 Explorer 没法把主窗口导航走；
+  - Explorer 在另一个端口上，跨源，拿不到 GUI 的 DOM / Cookie / 内部接口。
+
+### iframe 为什么挂在 `document.body` 上
+
+`conversation.view` 对非激活视图是**过滤掉**的，切走标签会真的卸载组件、连带销毁 iframe；
+而 Explorer 每次重载都要从头启动。实测过两条路：
+
+1. 「卸载前把 iframe 抢救到别处、回来再搬回去」—— **不行**。在 DOM 里 `appendChild` 搬动
+   iframe 会让它**重新加载**（搬 4 次 = 加载 5 次），脱离文档就丢浏览上下文；
+2. 「iframe 从头到尾待在同一个父节点里，宿主挂 `document.body`、只改 CSS」—— 行。累计
+   load 次数恒为 1。
+
+所以宿主常驻 `body`，靠 `position:fixed` 摆到视图里那个占位元素的位置上（没用 portal：
+客户端半侧只能 `require("react")`，拿不到 react-dom）。代价是位置要自己同步
+（`ResizeObserver` + `resize`/`scroll`），而且**不在图谱标签时必须隐藏**，否则这块 fixed
+会盖住别的界面。
+
+> 这套机制有回归测试：`scripts/visual-check.mjs` 里会卸载再挂载组件，断言 iframe 还是
+> **同一个元素**（挂了个 `data-mark` 认身份）、宿主隐藏又恢复、并且整棵树只有一个 canvas
+> 容器。**那个「只有一个 canvas」的断言是真抓出过 bug 的** —— 原来的写法里
+> ExplorerFrame 又套了一层同名容器，内层是普通 block、内容全绝对定位，高度塌成 0，
+> iframe 宿主跟着变成 0×0，图根本显示不出来。
+
+---
+
+## 四、分析：插件自己算
+
+`analyze(nodes, edges)` 全部是朴素算法，因为这里要的是「一眼看出哪个实体是枢纽、有几个
+社区」，不需要论文级精度，但必须**可解释**、必须毫秒级：
+
+- **枢纽**：度数 + PageRank（幂迭代 20 轮，阻尼 0.85，悬空节点按均匀分配处理）
+- **社区**：标签传播 10 轮（遍历顺序固定 → 多次运行结果一致）
+- **连通分量**：并查集
+- **决策**：清单（按时间倒序）+ 每条决策的关联实体（顺着 `involves` 边）
+- **时间线**：决策按天分桶
+- **概览**：节点/边/实体/关系/决策 + 类型分布 + 孤立节点
+
+「实体」= 非决策附属的节点，「关系」= 非决策挂载的边 —— 按**语义**分，不按
+`add_entity`/`add_relationship` 调用分。
+
+面板上的分析抽屉是插件渲染的，数据来自 `/api-semantica/analysis`。
+
+---
+
+## 五、装上 / 卸下
+
+```bash
+node scripts/install.mjs            # 安装（改 profile 前会备份）
+node scripts/install.mjs --dry-run  # 只打印要做什么
+node scripts/install.mjs --remove   # 移除
 ```
 
-卸载后重启 DSH 即可，仅移除插件引用，不影响其他 DSH 功能。
+前置：`<harness>/semantica-venv` 里装了 `semantica`（含 `semantica-mcp` 与
+`semantica.explorer` 需要的 `fastapi`/`uvicorn`）。脚本找不到那个解释器会直说。
+解释器位置也可以用 `DSH_SEMANTICA_PYTHON` 覆盖。
 
-> （注：部分内容可能由 AI 生成）
+**改完 host 半侧（`src/index.js` 等）必须重启 DSH Desktop 才生效**；浏览器半侧
+（`src/client.js`）是从源码加载的，改完刷新页面即可。
+
+## 六、自检
+
+```bash
+npm run check      # 六个源文件过一遍 node --check
+npm run selftest   # 离线全链路：造图 → 切图 → 分析 → 起真 Explorer → 假 ctx 跑真路由
+npm run visual     # 真 Chromium：12px、iframe 宿主、窄窗口溢出、抽屉、空态
+```
+
+- `selftest` 不启动 DSH，也不需要真会话：用插件 venv 里的 semantica 造一张图（两个会话
+  打标 + 一个没打标的实体 + 一条靠实体边归属的决策 + 一条只能靠时间认领的决策 + 一条
+  30 天前的决策用来验窗口边界），然后直接调 `src/index.js` 注册出来的真路由 handler。
+- `visual` 把 `src/client.js` 原样塞进一个真 Chromium 页面（配假的
+  `window.__ModuleLoader__` 和三个假接口），**量**计算样式而不是看截图。
+
+## 七、已知边界
+
+- **决策靠时间窗口认领**时，同一时间窗里别的会话的决策可能被带进来 —— 所以认领数量
+  在界面上明写，不藏着；模型按提示词传 `entities` 时走的是更准的实体边那条路。
+- **没打标的节点**只出现在「全部」里，界面上会报数量。这类节点多半是老版本或没读提示词
+  的模型写进去的。
+- **MCP 的 resources / prompts 拿不到**（`dsh-mcp-client` 只桥工具），所以 `query_graph`
+  之类只能由模型调，插件不能主动查图 —— 插件读的是图文件。
+- **Explorer 是独立子进程**：同一个视图重复出图会重启它（`--graph` 只在启动时读一次）。
+- 面板工具栏的统计是**切完图之后**的数字，「全部」模式看到的是整张图。
+
+## 许可
+
+MIT

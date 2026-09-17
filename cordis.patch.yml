@@ -1,9 +1,15 @@
 # dsh-semantica-graph bundle patch.
 #
-# Host half (package root) registers /api-semantica/* routes and bridges to the
-# Python `semantica` package over a persistent child process. The browser half
-# (dsh.client) is discovered automatically through the package's dsh.client
-# declaration + exports["./client"].
+# host 半侧（包根）负责三件事：
+#   1. 往系统提示词里注入「本会话标识 + 写入规则」那一段（模型据此调用 MCP 工具）
+#   2. /api-semantica/* 三个路由：status / view / analysis
+#   3. 起 semantica 自带的 Knowledge Explorer 子进程，把 URL 交给面板内嵌
+#
+# 浏览器半侧（dsh.client）由 package.json 的 dsh.client 声明 + exports["./client"] 自动发现。
+#
+# 注意：semantica 的 MCP server 是**另一条**配置项（id: mcp-semantica），
+# 由 scripts/install.mjs 幂等维护在 profile 的 cordis.patch.yml 里 —— 它不属于本
+# bundle，因为它要指向插件 venv 里的 semantica-mcp 绝对路径。
 
 - insert:
     - id: semantica-graph

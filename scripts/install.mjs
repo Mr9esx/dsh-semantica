@@ -1,17 +1,16 @@
 #!/usr/bin/env node
 // scripts/install.mjs — 把本插件装进 DSH Desktop 的 web profile。
 //
-// 做的事（全部幂等，且动 profile 前先备份）：
-//   1. 备份 profile/package.json
-//   2. dependencies 加 "dsh-semantica-graph": "link:<本插件目录>"
-//   3. pnpm.overrides 加同一条 link（与 desktop 里其它本地插件一致）
-//   4. dsh.profile.bundles 追加 "dsh-semantica-graph"
-//   5. 往 profile 的 cordis.patch.yml 里幂等写入 semantica MCP 条目（标记块）
-//   6. 用 desktop 自带的 pnpm 跑 install
+// 做的事（全部幂等，动 profile 前先备份）：
+//   1. profile/package.json：dependencies + pnpm.overrides 加 link:<插件目录>，
+//      dsh.profile.bundles 追加插件名
+//   2. profile/cordis.patch.yml：用哨兵标记维护「semantica MCP」那一条配置项
+//   3. 有改动时用 desktop 自带的 pnpm 跑一次 install
 //
-// desktop 的 pnpm runner 在跑 pnpm 前会临时摘掉 generation-projection 管理的插件
-// 依赖（避免 pnpm 抹掉它们），跑完再恢复——我们加的这个插件不在 projection 里，
-// 因此不会被摘掉。
+// 第 2 步是这套架构的关键：模型能写进图，全靠 `mcp-semantica` 这条配置把
+// `semantica-mcp` 挂成 `mcp__semantica__*` 工具。没有它，面板永远是空的。
+// 那个子进程的环境会先被 dsh-mcp-client 清洗（删掉所有 DSH_* 和含 KEY/SECRET/TOKEN
+// 的变量），所以 SEMANTICA_KG_PATH 必须在这里写死绝对路径。
 //
 // 用法：
 //   node scripts/install.mjs              # 安装
@@ -52,9 +51,9 @@ function fail(msg) {
 
 if (!existsSync(MANIFEST)) fail(`找不到 profile manifest：${MANIFEST}`)
 
-const original = readFileSync(MANIFEST, 'utf8')
-const manifest = JSON.parse(original)
+// ─────────────────────────── 1. profile manifest ───────────────────────────
 
+const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'))
 manifest.dependencies = manifest.dependencies ?? {}
 manifest.pnpm = manifest.pnpm ?? {}
 manifest.pnpm.overrides = manifest.pnpm.overrides ?? {}
@@ -66,13 +65,14 @@ const linkSpec = `link:${PLUGIN_DIR}`
 const changes = []
 
 if (REMOVE) {
-  if (Object.hasOwn(manifest.dependencies, PLUGIN_NAME)) {
-    delete manifest.dependencies[PLUGIN_NAME]
-    changes.push(`移除 dependencies.${PLUGIN_NAME}`)
-  }
-  if (Object.hasOwn(manifest.pnpm.overrides, PLUGIN_NAME)) {
-    delete manifest.pnpm.overrides[PLUGIN_NAME]
-    changes.push(`移除 pnpm.overrides.${PLUGIN_NAME}`)
+  for (const [holder, label] of [
+    [manifest.dependencies, 'dependencies'],
+    [manifest.pnpm.overrides, 'pnpm.overrides'],
+  ]) {
+    if (Object.hasOwn(holder, PLUGIN_NAME)) {
+      delete holder[PLUGIN_NAME]
+      changes.push(`移除 ${label}.${PLUGIN_NAME}`)
+    }
   }
   const i = manifest.dsh.profile.bundles.indexOf(PLUGIN_NAME)
   if (i >= 0) {
@@ -99,9 +99,13 @@ if (changes.length === 0) {
 } else {
   console.log(`• profile: ${MANIFEST}`)
   for (const c of changes) console.log(`  - ${c}`)
+  if (!DRY) {
+    copyFileSync(MANIFEST, `${MANIFEST}.bak.semantica-${Date.now()}`)
+    writeFileSync(MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`)
+  }
 }
 
-// ── semantica MCP：往 profile 的 cordis.patch.yml 写一条 mcp-client 条目 ──
+// ── 2. semantica MCP：往 profile 的 cordis.patch.yml 写一条 mcp-client 条目 ──
 //
 // 为什么不解析 YAML 再序列化：那个文件里有用户自己的注释和 `!!js` 表达式，
 // 过一遍 parser/serializer 会把注释全丢掉。所以用**哨兵标记 + 文本级**处理：
@@ -128,15 +132,16 @@ const PATCH_DEFAULT = `# Your patch layer for this dsh profile, applied after ev
 function mcpBlock() {
   return [
     MCP_BEGIN,
-    '# semantica MCP（知识图谱的「声明」通道）',
+    '# semantica MCP —— 知识图谱的**写入通道**。',
     '#',
-    '# 上游推荐的用法就是 MCP：agent 在做事的过程中主动声明决策/实体/关系，',
-    '# 而不是事后从对话记录里反推。15 个工具，模型看到的名字是 mcp__semantica__<tool>。',
+    '# 模型用它把当前对话抽成图：extract_entities/extract_relations 抽取，',
+    '# add_entity/add_relationship 写入，record_decision 记决策。15 个工具，',
+    '# 模型看到的名字是 mcp__semantica__<tool>。',
     '#',
-    '# 注意两点：',
-    '#   · MCP resources 与 prompts 不受 dsh-mcp-client 支持，只桥接工具；',
+    '# 两点必须知道（都是 dsh-mcp-client 的行为，不是这里的偏好）：',
     '#   · 子进程环境会先被清洗（删掉 KEY|PASSWORD|SECRET|TOKEN 和所有 DSH_*），',
-    '#     所以 SEMANTICA_KG_PATH 必须在这里显式给出，不能指望继承父进程环境。',
+    '#     所以 SEMANTICA_KG_PATH 只能在这里显式写死，不能指望继承父进程环境；',
+    '#   · 只桥接工具能力，MCP resources / prompts 不会出现在 DSH 里。',
     '- insert:',
     '    - id: mcp-semantica',
     "      name: '@deepseek-ai/dsh-mcp-client'",
@@ -144,7 +149,7 @@ function mcpBlock() {
     '        serverName: semantica',
     '        transport: stdio',
     `        command: '${MCP_BIN}'`,
-    '        # 声明出来的图落在这里；semantica 的 MCP server 启动时会自动加载它。',
+    '        # 图落在这里；semantica 的 MCP server 启动时自动加载它。',
     '        env:',
     `          SEMANTICA_KG_PATH: '${KG_FILE}'`,
     '        # 首次连接失败不静默：工具没挂上会记录错误，设 true 则直接中止启动。',
@@ -155,7 +160,7 @@ function mcpBlock() {
 
 function syncPatch() {
   const exists = existsSync(PATCH)
-  let text = exists ? readFileSync(PATCH, 'utf8') : PATCH_DEFAULT
+  const text = exists ? readFileSync(PATCH, 'utf8') : PATCH_DEFAULT
   const hasMark = text.includes(MCP_BEGIN) && text.includes(MCP_END)
   let next = text
   let note = null
@@ -199,7 +204,7 @@ function syncPatch() {
   console.log(`  - ${note}`)
   if (!REMOVE && !existsSync(MCP_BIN)) {
     console.log(`  ! 找不到 ${MCP_BIN} —— 该条目指向的服务器还不存在。`)
-    console.log(`    先按 README「步骤1」建好 Python 环境，再重跑本脚本。`)
+    console.log('    先建好 Python 环境（semantica-venv）并装 semantica，再重跑本脚本。')
   }
   if (REMOVE && !exists) return
   if (next === text) return
@@ -219,60 +224,15 @@ if (DRY) {
   process.exit(0)
 }
 
-if (changes.length > 0) {
-  const backup = `${MANIFEST}.bak.semantica-${Date.now()}`
-  copyFileSync(MANIFEST, backup)
-  console.log(`• 备份原 manifest → ${backup}`)
-  writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + '\n')
-}
+// ─────────────────────────── 3. pnpm install ───────────────────────────
 
-// 跑 pnpm install（用 desktop 自带的 wrapper，保证与它自己的安装语义一致）
-if (!existsSync(PNPM)) {
-  console.log(`! 找不到 desktop pnpm（${PNPM}），请在 profile 目录手动执行 pnpm install：`)
-  console.log(`    cd "${PROFILE}" && pnpm install`)
+if (changes.length === 0) {
+  console.log('• profile 无改动，跳过 pnpm install')
   process.exit(0)
 }
 
 console.log(`• 运行 pnpm install（${PROFILE}）…`)
-const res = spawnSync(PNPM, ['install'], {
-  cwd: PROFILE,
-  stdio: 'inherit',
-  env: { ...process.env, DSH_HOME: HOME },
-})
-
-if (res.status !== 0) {
-  console.error(`\n✗ pnpm install 失败（退出码 ${res.status}）。`)
-  console.error(`  profile manifest 已改动；需要回滚就恢复备份文件。`)
-  process.exit(res.status ?? 1)
-}
-
-// 客户端半侧直接加载 src/client.js（只依赖 react，在基座冻结表里），
-// 没有第三方库要内联，因此不需要构建步骤。
-
-console.log(`
-✓ 安装完成。
-
-接下来：
-  1. 在 DSH Desktop 里硬刷新页面（Cmd+Shift+R）
-     —— 客户端半侧是热加载的；host 半侧（新路由）需要重启 DSH Desktop 才生效。
-  2. 打开任意会话，点会话标题右侧的图谱按钮。
-
-两件 Python 侧的前置事项：
-
-  (a) Semantica 本体 + Explorer 组件。Explorer 是可选 extra，
-      裸装 semantica 不带 fastapi / uvicorn：
-
-        <venv>/bin/pip install "semantica[explorer]"
-
-      两个 spaCy 模型（en_core_web_sm / zh_core_web_sm）也都必须装。
-
-      插件按顺序自动探测解释器：
-        1. 环境变量 DSH_SEMANTICA_PYTHON
-        2. $DSH_HOME/semantica-venv/bin/python   ← 推荐，见 README
-        3. 插件目录旁的 .venv/bin/python
-        4. python3
-
-  (b) 重启 DSH Desktop。Explorer 界面不需要额外配置 —— 插件在自己的
-      侧边栏标签里直接内嵌 iframe，不走 better-sidebar 的浏览器标签，
-      因此**不需要**去配「浏览器本地回环允许清单」。
-`)
+const res = spawnSync(PNPM, ['install'], { cwd: PROFILE, stdio: 'inherit' })
+if (res.error) fail(`pnpm 跑不起来：${res.error.message}`)
+if (res.status !== 0) fail(`pnpm install 失败（exit ${res.status}）`)
+console.log('✓ 装好了。host 半侧的路由与提示词段需要重启 DSH Desktop 才会生效。')
