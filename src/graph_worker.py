@@ -437,6 +437,63 @@ def _is_ordinal_label(name):
     return bool(_ORDINAL_LABEL.match(s)) or s.lower() in _ORDINAL_WORDS
 
 
+# 中文里以「的」结尾的**修饰语**（`开源的`、`确定性的`），不是实体。
+#
+# 为什么会漏进来：中文没有词间空格，spaCy 的 zh 模型常把一个「形容词 + 的」整体
+# 划成名词短语。实测在一个只谈了几百字的会话里，9 个实体里有 2 个是这种
+# （`开源的`、`确定性的`）—— 它们不是这场对话在谈的**东西**，是在形容某个东西。
+#
+# ⚠️ 不能只按「以 的 结尾」判：`目的`（purpose）和 `标的` 都是真名词，
+# 两个字、以「的」收尾。所以门槛设在**长度 ≥ 3**：`开源的`(3) 丢，`目的`(2) 留。
+# 三个字以上、以「的」结尾的名词在技术对话里基本不存在，这个界是安全的。
+_CJK_MODIFIER_LABEL = re.compile(r"^[\u4e00-\u9fff]{2,}的$")
+
+
+def _is_cjk_modifier(name):
+    s = str(name).strip()
+    return len(s) >= 3 and bool(_CJK_MODIFIER_LABEL.match(s))
+
+
+# 英文里被截断成「半个句子」的假实体（实测 `for Context and` 被标成 PERSON）。
+#
+# 真正的命名实体不会以功能词开头、也不会以连词收尾 —— 这两点都是「这里本来是
+# 一句话，被切下来一截」的形状证据。判据用**词**而不是字符：
+#
+#   起首是功能词 **且** 词数 ≥ 3   → 丢（`for Context and`）
+#   收尾是功能词                   → 丢（`Context and`、`of the`）
+#   功能词出现 ≥ 2 次              → 丢（兜住中间夹着的那些）
+#
+# ⚠️ 三条都刻意留了余地，为的是不误伤 `The Beatles` 这类：
+# 它起首是功能词但只有 2 个词、收尾不是功能词、功能词只有 1 个 → 留下。
+_EN_FUNCTION_WORDS = frozenset({
+    "for", "and", "or", "but", "of", "the", "a", "an", "to", "in", "on", "at",
+    "by", "from", "with", "as", "is", "are", "was", "were", "be", "that", "this",
+    "these", "those", "it", "its", "if", "then", "than", "so", "not", "no",
+})
+# 收尾功能词只用**连接/介词**类，不把 the/this 算进来 —— 英文里有
+# `The Who`、`The The` 这种以 the 收尾的乐队名，虽然罕见，但没必要冒险。
+_EN_TRAILING_FUNCTION = frozenset({
+    "and", "or", "but", "of", "for", "with", "to", "in", "on", "at", "by", "from", "as",
+})
+_EN_WORD = re.compile(r"[A-Za-z]+")
+
+
+def _looks_like_sentence_fragment(name):
+    s = str(name).strip()
+    # 只判纯英文（无 CJK）：中文没有词间空格，这套「首尾功能词」的形状判据不成立
+    if not s or _CJK_LABEL.search(s):
+        return False
+    tokens = [t.lower() for t in _EN_WORD.findall(s)]
+    if len(tokens) < 2:
+        return False
+    funcs = sum(1 for t in tokens if t in _EN_FUNCTION_WORDS)
+    if tokens[-1] in _EN_TRAILING_FUNCTION:
+        return True
+    if tokens[0] in _EN_FUNCTION_WORDS and len(tokens) >= 3:
+        return True
+    return funcs >= 2
+
+
 def _entity_span(ent):
     """取实体的字符跨度（对**归一化后**文本的偏移）。"""
     if isinstance(ent, dict):
@@ -825,6 +882,12 @@ def build_context_graph(payload):
             if _looks_like_fragment(name, text, e_start, e_end):
                 continue
             if _is_ordinal_label(name):
+                continue
+            # 以「的」结尾的中文修饰语（`开源的`）不是实体，是被形容的东西的一部分
+            if _is_cjk_modifier(name):
+                continue
+            # 被切成半个句子的英文假实体（`for Context and` 这种）
+            if _looks_like_sentence_fragment(name):
                 continue
             # 度量/时间类：实测全是 134px、6个月、上百 这种片段
             if str(etype).upper() in _NOISE_ETYPES:

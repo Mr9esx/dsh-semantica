@@ -11,8 +11,29 @@
 
 ## 接进来的配置
 
-写进 profile 的 patch 层（本机是
-`~/Library/Application Support/dsh-desktop/harness/profiles/web/cordis.patch.yml`）：
+**推荐用安装脚本**，它是幂等的、动文件前先备份：
+
+```bash
+node scripts/install.mjs            # 安装（同时幂等维护 MCP 条目）
+node scripts/install.mjs --dry-run  # 只打印将要做的事
+node scripts/install.mjs --remove   # 连 MCP 条目一起移除
+```
+
+脚本写进 profile 的 patch 层（本机是
+`~/Library/Application Support/dsh-desktop/harness/profiles/web/cordis.patch.yml`），
+用一对哨兵标记圈住自己维护的那一段：
+
+```
+# >>> dsh-semantica-graph: semantica MCP   ← 标记之间的内容由脚本维护
+# <<< dsh-semantica-graph: semantica MCP
+```
+
+标记之外一个字都不动（用文本级处理而不是 YAML 解析再序列化 —— 那个文件里有用户
+自己的注释和 `!!js` 表达式，过一遍 parser/serializer 会把注释全丢掉）。
+四种情况都验过：空列表 `[]` → 替换；用户已有条目 → 追加；重复跑 → 报「已是最新」；
+`--remove` → 只摘掉标记块、用户自己的条目留着。
+
+手动写的话，条目长这样（路径按需替换）：
 
 ```yaml
 - insert:

@@ -15,6 +15,10 @@
 //                 到「小写开头的驼峰」，这些专有名词会一起被当成代码标识符
 //     · `白名单里` 里的「里」紧挨着「白名单」—— 邻接判据只能对 ASCII 用，
 //                 对中文用会把正常词整片丢掉（中文没有词间空格）
+//     · `目的` / `标的` 是真名词、以「的」收尾 —— 「以 的 结尾的中文修饰语」
+//                 这条规则若只按后缀判，会把它们一起丢掉
+//     · `The Beatles` 起首是功能词 —— 「被截断成半个句子的英文」这条规则若不收窄，
+//                 会把这类真名字误伤
 //
 // 只需要系统 python3：这些规则都是纯字符串判断，import graph_worker 不会拉起 spaCy。
 
@@ -60,6 +64,27 @@ out = {
     "ord_third_party": gw._is_ordinal_label("第三方"),
     "ord_cookie": gw._is_ordinal_label("第三方 Cookie"),
     "ord_semantica": gw._is_ordinal_label("Semantica"),
+
+    # ── 以「的」结尾的中文修饰语（不是实体）──
+    "cjkmod_kaiyuan": gw._is_cjk_modifier("开源的"),
+    "cjkmod_queding": gw._is_cjk_modifier("确定性的"),
+    "cjkmod_mudi": gw._is_cjk_modifier("目的"),
+    "cjkmod_biaodi": gw._is_cjk_modifier("标的"),
+    "cjkmod_zhongwen_ok": gw._is_cjk_modifier("中文"),
+    "cjkmod_en_ok": gw._is_cjk_modifier("Context Graph"),
+    "cjkmod_mixed_ok": gw._is_cjk_modifier("开源的 Semantica"),
+
+    # ── 被截断成半个句子的英文假实体 ──
+    "frag_en_for_and": gw._looks_like_sentence_fragment("for Context and"),
+    "frag_en_trailing_and": gw._looks_like_sentence_fragment("Context and"),
+    "frag_en_trailing_of": gw._looks_like_sentence_fragment("the list of"),
+    "frag_en_two_funcs": gw._looks_like_sentence_fragment("context of the graph"),
+    "frag_en_ok_semantica": gw._looks_like_sentence_fragment("Semantica"),
+    "frag_en_ok_ctxgraph": gw._looks_like_sentence_fragment("Context Graph"),
+    "frag_en_ok_beatles": gw._looks_like_sentence_fragment("The Beatles"),
+    "frag_en_ok_mit": gw._looks_like_sentence_fragment("MIT License"),
+    "frag_en_ok_threewords": gw._looks_like_sentence_fragment("Knowledge Graph Explorer"),
+    "frag_en_cjk_ok": gw._looks_like_sentence_fragment("开源的 and 免费的"),
 
     # ── 行内代码证据 ──
     "code_ticked": gw._in_inline_code("因 \`numpy\` ABI 冲突", "numpy"),
@@ -135,6 +160,27 @@ check('first / 首次 判为序数', r.ord_first && r.ord_shouci)
 check('第三方 不是序数（被 zh 模型标成 ORDINAL 的那个）', r.ord_third_party === false, String(r.ord_third_party))
 check('第三方 Cookie 不是序数', r.ord_cookie === false, String(r.ord_cookie))
 check('Semantica 不是序数', r.ord_semantica === false, String(r.ord_semantica))
+
+console.log('── 以「的」结尾的中文修饰语：形容词不是实体，但真名词不能误伤')
+check('开源的 判为修饰语', r.cjkmod_kaiyuan === true, String(r.cjkmod_kaiyuan))
+check('确定性的 判为修饰语', r.cjkmod_queding === true, String(r.cjkmod_queding))
+check('目的 不被误伤（两个字真名词）', r.cjkmod_mudi === false, String(r.cjkmod_mudi))
+check('标的 不被误伤', r.cjkmod_biaodi === false, String(r.cjkmod_biaodi))
+check('中文 不被误伤', r.cjkmod_zhongwen_ok === false, String(r.cjkmod_zhongwen_ok))
+check('Context Graph 不被误伤', r.cjkmod_en_ok === false, String(r.cjkmod_en_ok))
+check('中英混合不被误伤', r.cjkmod_mixed_ok === false, String(r.cjkmod_mixed_ok))
+
+console.log('── 被截断成半个句子的英文假实体')
+check('for Context and 判为半句话（实测被标成 PERSON 的那个）', r.frag_en_for_and === true, String(r.frag_en_for_and))
+check('Context and 判为半句话（以连词收尾）', r.frag_en_trailing_and === true, String(r.frag_en_trailing_and))
+check('the list of 判为半句话（以介词收尾）', r.frag_en_trailing_of === true, String(r.frag_en_trailing_of))
+check('context of the graph 判为半句话（功能词 ≥ 2）', r.frag_en_two_funcs === true, String(r.frag_en_two_funcs))
+check('Semantica 不被误伤', r.frag_en_ok_semantica === false, String(r.frag_en_ok_semantica))
+check('Context Graph 不被误伤', r.frag_en_ok_ctxgraph === false, String(r.frag_en_ok_ctxgraph))
+check('The Beatles 不被误伤（起首功能词但只有 2 个词）', r.frag_en_ok_beatles === false, String(r.frag_en_ok_beatles))
+check('MIT License 不被误伤', r.frag_en_ok_mit === false, String(r.frag_en_ok_mit))
+check('Knowledge Graph Explorer 不被误伤', r.frag_en_ok_threewords === false, String(r.frag_en_ok_threewords))
+check('含中文的不走这套判据', r.frag_en_cjk_ok === false, String(r.frag_en_cjk_ok))
 
 console.log('── 行内代码证据')
 check('反引号里的 numpy 有证据', r.code_ticked === true)
