@@ -336,6 +336,133 @@ def _is_stopword(name):
     return str(name).strip().lower() in _STOPWORDS
 
 
+# ── 实体噪声：以下是**实测**出来的形态，不是想当然 ──────────────────────────
+#
+# 用本仓库作者的一次真实会话量的（28 轮 / 997 段 / 325 个实体）：
+#   · PERSON 125 个里几乎全是代码标识符和普通英文词 —— graph(度 23)、tool、
+#     out、locale、TypeError、text、title…，真正的人名只有 `张三` 这种占位符
+#   · CARDINAL 28 个全是 `134px` / `625px` / `上百` / `②本体`
+#   · DATE 18 个是 `今天` / `localhost` / `汉化` / `00014 个月`
+#   · LAW 2 个是 `GROUP BY` / `Exclude all local artifacts`
+#   · `cy`（NORP，度 44，全图第 5）来自 `cytoscape/d3/mermaid` —— 被切了一半
+# 不拦掉的话实体层的信噪比是反的：噪声度更高、排得更前，AI 分析先看到的就是它们。
+#
+# 取舍方向很关键：**纠正类型，但不丢术语**。行内代码里的 `numpy` / `graph`
+# 正是这场对话在谈的东西，strip_markdown 的注释也写明了要保留它们 ——
+# 所以只把 spaCy 给错的类型（numpy 被标成 GPE）改成 CODE，实体本身留着。
+# 只有「被切碎的词」和「本身就不该是实体的词」才整条丢。
+
+# 这些类型在技术对话里实测全是度量/时间片段，没有信息量。
+# （真正的日期如 `2026-09-16` 早被 _looks_like_noise 的纯数字规则拦住了。）
+_NOISE_ETYPES = frozenset({
+    "CARDINAL", "DATE", "TIME", "MONEY", "QUANTITY", "PERCENT",
+    "WORK_OF_ART", "LAW", "EVENT",
+})
+
+# spaCy 的「命名实体」类型 —— 判断代码标识符时不能采信这几个。
+_CODE_UNTRUSTED_ETYPES = frozenset({"PERSON", "ORG", "GPE", "FAC", "NORP", "LOC"})
+
+# 标识符形状的判据比「行内代码」更强，连 PRODUCT 一起纠 —— 实测
+# browserAllowedLoopback 被标成 PRODUCT。GUI 这类全大写缩写不会命中标识符形状
+# （它只有首字母大写，没有「小写紧跟大写」的转折），所以不会被误伤。
+_CODE_UNTRUSTED_ETYPES_SHAPE = _CODE_UNTRUSTED_ETYPES | {"PRODUCT"}
+
+# 代码标识符 / 技术术语统一标成它。Explorer 的配色是按数据里的类型动态生成的，
+# 类型也没有硬编码白名单（实测 _get_entity_type_colors 支持任意类型），所以新类型安全。
+_CODE_ETYPE = "CODE"
+
+# 标识符形状本身就是「这是代码」的证据，不必等反引号。
+# 实测漏网的 `browserAllowedLoopback`（被标成 PRODUCT）就是这个形状。
+#
+# 判据刻意收窄到**小写开头**的驼峰，以及下划线 / :: / -> ：
+#   browserAllowedLoopback ✓  openDetails ✓  open_details ✓  std::vector ✓
+#   TypeScript ✗  GitHub ✗  PostgreSQL ✗  GUI ✗  Semantica ✗
+# 因为「小写紧跟大写」对以大写开头的一串同样成立，而现实世界里的名字
+# （GitHub / TypeScript / PostgreSQL）恰好都是那个形状 —— 按宽判据会把它们
+# 一起当成代码。写成反引号的 `NamedEntityRecognizer` 这类另有「行内代码」那条兜住。
+_IDENTIFIER_SHAPE = re.compile(r"_|::|->|^[a-z][A-Za-z0-9]*[A-Z]")
+
+# 含中文的标签，spaCy 的这几个类型**实测等于随机**：
+#   GPE  → 白捡 / 扇出 / 上界 / 平台层 / 硬伤 / 里加 / 加真 / 初始值
+#   PERSON → 白名单 / 简单力 / 哈希类名 / 浏览器 / 返回值 / 决策链 / 内容区 / 偏门面
+#   FAC  → 假数据 / 核心槽 / GitHub 仓库     NORP → 平方级 / 图标变
+#   LOC  → zhcorewebsm / 提示                ORG  → 静默复查 / 中英 / 中心度 / 沙箱 iframe
+# 这些词本身不少是有意义的（扇出、上界、白名单 都是这场对话在谈的概念），
+# 所以**不丢实体，只把类型改成诚实的 UNKNOWN**。语言类标得准（中文/英文 → LANGUAGE），
+# 予以保留；术语只要带反引号或标识符形状就还是会变成 CODE。
+_CJK_UNTRUSTED_ETYPES = frozenset({
+    "PERSON", "ORG", "GPE", "FAC", "NORP", "LOC", "PRODUCT", "WORK_OF_ART", "LAW", "EVENT",
+})
+_CJK_LABEL = re.compile(r"[\u4e00-\u9fff]")
+_UNKNOWN_ETYPE = "UNKNOWN"
+
+# 序数词。**按整词匹配，不按类型丢** —— 实测 zh 模型把名词 `第三方`
+# 也标成了 ORDINAL，按类型丢会误伤它。
+_ORDINAL_LABEL = re.compile(r"^第[一二三四五六七八九十百千两0-9]+$")
+_ORDINAL_WORDS = frozenset({
+    "first", "second", "third", "fourth", "fifth",
+    "首次", "首先", "最初", "最后", "其次",
+})
+
+
+def _looks_like_fragment(name, text, start, end):
+    """
+    实体名是不是某个更长的词被切下来的一截。
+
+    实测两个来源：`cytoscape/d3/mermaid` → `cy`；`MIT LICENSE` → `MIT LICEN`。
+    共同点是**跨度的紧邻字符还是 ASCII 字母或数字** —— 那它一定不是完整的词。
+
+    只对含 ASCII 字母的名字判断。中文没有词间空格，紧邻汉字是常态
+    （`白名单里` 的「里」就紧挨着），按邻接判会把正常词整片丢掉。
+    """
+    if not isinstance(name, str) or not re.search(r"[A-Za-z]", name):
+        return False
+    if not isinstance(start, int) or not isinstance(end, int):
+        return False
+    if start < 0 or end > len(text) or start >= end:
+        return False
+
+    def _word_char(ch):
+        return ch.isascii() and (ch.isalnum() or ch == "_")
+
+    if start > 0 and _word_char(text[start - 1]):
+        return True
+    if end < len(text) and _word_char(text[end]):
+        return True
+    return False
+
+
+def _is_ordinal_label(name):
+    s = str(name).strip()
+    return bool(_ORDINAL_LABEL.match(s)) or s.lower() in _ORDINAL_WORDS
+
+
+def _entity_span(ent):
+    """取实体的字符跨度（对**归一化后**文本的偏移）。"""
+    if isinstance(ent, dict):
+        s, e = ent.get("start_char"), ent.get("end_char")
+    else:
+        s, e = getattr(ent, "start_char", None), getattr(ent, "end_char", None)
+    return (s if isinstance(s, int) else None, e if isinstance(e, int) else None)
+
+
+def _in_inline_code(raw, name):
+    """
+    这个词在**原文**里是不是写在行内代码（反引号）里。
+
+    这是本仓库最可靠的「它是代码标识符、不是现实世界的命名实体」证据 ——
+    技术对话里的术语基本都带反引号写。拿它纠正 spaCy 给错的类型，
+    比按大小写、下划线去猜准得多，也和 strip_markdown「保留行内代码内容」的
+    既有设计方向一致。
+    """
+    if not raw or not name:
+        return False
+    for m in _INLINE_CODE.finditer(raw):
+        if name in m.group(1):
+            return True
+    return False
+
+
 # ── markdown 归一化 ────────────────────────────────────────────────────────
 #
 # 助手的正文是 markdown。直接把它喂进 spaCy 会出两类脏实体：
@@ -420,6 +547,25 @@ def _iso_local(ms):
         return datetime.fromtimestamp(ts).isoformat()
     except (OverflowError, OSError, ValueError):
         return None
+
+
+# tool 节点 content 的上限。1821 个 tool 节点 × 每个几百字符，图文件大约涨 1MB；
+# 换来的是详情里能看到「跑了什么、输出什么」，而且 content 会进 Explorer 的搜索索引。
+_TOOL_ARGS_CHARS = 300
+_TOOL_RESULT_CHARS = 200
+
+
+def _tool_content(tc):
+    """tool 节点的详情正文：一句话标题 + 参数 + 输出。"""
+    title = str(tc.get("title") or tc.get("name") or "tool").strip()
+    args = str(tc.get("argsSummary") or "").strip()
+    result = str(tc.get("resultSummary") or "").strip()
+    parts = [title]
+    if args:
+        parts.append(args[:_TOOL_ARGS_CHARS])
+    if result:
+        parts.append("── 输出 ──\n" + result[:_TOOL_RESULT_CHARS])
+    return "\n".join(parts)
 
 
 def build_context_graph(payload):
@@ -540,6 +686,12 @@ def build_context_graph(payload):
             "label": tc.get("title") or tc.get("name") or "tool",
             "kind": "tool",
             "tool": tc.get("name"),
+            # 详情正文：标题 + 参数 + 输出。
+            # 这里曾经没有 content —— 于是它一路回落到 label（只有一行描述），
+            # 点开 bash 节点看不到跑了什么命令、更看不到输出；而 argsSummary /
+            # resultSummary 在 JS 侧算好了、也传过来了，只是没人用。
+            # 另外 Explorer 的搜索索引是拿 content 建的，补上之后命令与输出都可搜。
+            "content": _tool_content(tc),
             **time_of(tc.get("time")),
         })
         if tc.get("turn") is not None:
@@ -636,11 +788,45 @@ def build_context_graph(payload):
     # ── 2. 语义层：逐段抽实体与关系 ────────────────────────────────────────
     ent_ids = {}        # 归一化名 -> 节点 id
     ent_span = {}       # 实体节点 id -> [最早提及 ms, 最晚提及 ms]
+    ent_last_turn = {}  # 实体节点 id -> 最后一次被提及时的轮次
+    ent_code = set()    # 实体节点 id -> 至少有一次提及写在行内代码里
     relations = 0
 
+    # 每轮的结束时刻 = 下一轮的开始；最后一轮没有下一轮，用全段最晚时刻兜底。
+    # 用途见下面写 valid_until 的地方。
+    _turn_start = {}
+    for _t in turns:
+        _n, _ms = _t.get("turn"), _t.get("time")
+        if _n is None or _ms is None:
+            continue
+        try:
+            _v = float(_ms)
+        except (TypeError, ValueError):
+            continue
+        _turn_start[int(_n)] = _v / 1000.0 if _v > 1e11 else _v
+    _order = sorted(_turn_start)
+    turn_end = {
+        n: (_turn_start[_order[i + 1]] if i + 1 < len(_order) else None)
+        for i, n in enumerate(_order)
+    }
+    _seg_times = []
+    for _s in segments:
+        try:
+            _v = float(_s.get("time"))
+        except (TypeError, ValueError):
+            continue
+        _seg_times.append(_v / 1000.0 if _v > 1e11 else _v)
+    session_end = max(_seg_times) if _seg_times else None
+    if session_end is not None:
+        for _n in _order:
+            if turn_end[_n] is None:
+                turn_end[_n] = session_end
+
     for seg in segments:
-        # 与 build_graph 一致：先归一化 markdown 再抽取
-        text = strip_markdown(seg.get("text") or "")
+        # 与 build_graph 一致：先归一化 markdown 再抽取。
+        # raw_text 单独留着：判断「这个词是不是写在反引号里」要用带反引号的原文。
+        raw_text = seg.get("text") or ""
+        text = strip_markdown(raw_text)
         if not text:
             continue
 
@@ -680,10 +866,28 @@ def build_context_graph(payload):
             name, etype, _conf = parsed
             if _looks_like_noise(name) or _is_stopword(name):
                 continue
+            # 被切碎的词先丢 —— 它连一个完整的词都不是
+            e_start, e_end = _entity_span(ent)
+            if _looks_like_fragment(name, text, e_start, e_end):
+                continue
+            if _is_ordinal_label(name):
+                continue
+            # 度量/时间类：实测全是 134px、6个月、上百 这种片段
+            if str(etype).upper() in _NOISE_ETYPES:
+                continue
+            # 类型纠错**只记证据**，不在这里改类型。
+            #
+            # 这里踩过一次：当场改是错的，因为节点的 etype 在**第一次**提及建立节点时
+            # 就定下来了，后面的提及即使带证据也覆盖不了 —— 结果完全取决于哪一段先被扫到。
+            # 实测 `numpy` 就是受害者：它有时裸写（"因 numpy ABI 冲突损坏"）、
+            # 有时带反引号（"`numpy` 原版本 1.26.4"），谁先出现谁定类型，
+            # 于是它仍然挂着 spaCy 给的 GPE。改成先收证据、最后统一改。
             key = _norm_key(name)
             if not key:
                 continue
             nid = f"ent:{key}"
+            if _in_inline_code(raw_text, name):
+                ent_code.add(nid)
             if nid not in nodes:
                 node(nid, "entity", {
                     "label": name, "etype": etype, "kind": "entity", "mentions": 0,
@@ -699,11 +903,13 @@ def build_context_graph(payload):
                     span = ent_span.get(nid)
                     if span is None:
                         ent_span[nid] = [ms, ms]
+                        ent_last_turn[nid] = seg.get("turn")
                     else:
                         if ms < span[0]:
                             span[0] = ms
                         if ms > span[1]:
                             span[1] = ms
+                            ent_last_turn[nid] = seg.get("turn")
                 except (TypeError, ValueError):
                     pass
             ent_ids.setdefault(key, nid)
@@ -744,15 +950,55 @@ def build_context_graph(payload):
 
     # 段落都扫完了，实体的提及跨度才是最终值 —— 现在才写回节点。
     # 放在循环里写会写成「当前已知的最早/最晚」，多段实体会来回改很多次。
+    # 证据收齐了，现在统一纠正类型：只要**有一次**提及是写在行内代码里的，
+    # 它就是代码标识符，spaCy 那几个「命名实体」类型一律不采信。
+    for nid in ent_code:
+        props = nodes.get(nid, {}).get("properties")
+        if props and str(props.get("etype", "")).upper() in _CODE_UNTRUSTED_ETYPES:
+            props["etype"] = _CODE_ETYPE
+
+    # 标识符形状（驼峰 / 下划线 / :: / ->）也是代码证据 —— 不必等反引号
+    for nid, nd in nodes.items():
+        props = nd.get("properties") or {}
+        if nd.get("type") != "entity":
+            continue
+        label = str(props.get("label") or "")
+        if not _IDENTIFIER_SHAPE.search(label):
+            continue
+        if str(props.get("etype", "")).upper() in _CODE_UNTRUSTED_ETYPES_SHAPE:
+            props["etype"] = _CODE_ETYPE
+
+    # 含中文的标签：spaCy 那几个类型实测等于随机，改成诚实的 UNKNOWN。
+    # 注意这里**只改类型、不丢节点** —— 扇出/上界/白名单 这些都是这场对话真正在谈的概念。
+    for nid, nd in nodes.items():
+        if nd.get("type") != "entity":
+            continue
+        props = nd.get("properties") or {}
+        label = str(props.get("label") or "")
+        if not _CJK_LABEL.search(label):
+            continue
+        if str(props.get("etype", "")).upper() in _CJK_UNTRUSTED_ETYPES:
+            props["etype"] = _UNKNOWN_ETYPE
+
     for nid, (first_ms, last_ms) in ent_span.items():
         props = nodes[nid]["properties"]
         iso_from = _iso_local(first_ms)
         if iso_from:
             props["valid_from"] = iso_from
-        # 只被提到一次的实体不必给 valid_until：一个瞬时点，
-        # 给了反而会让时间轴上出现零长度区间。
-        if last_ms > first_ms:
-            iso_until = _iso_local(last_ms)
+        # 结束时刻取「最后一次提及**所在那一轮的结束**」，而不是最后一次提及的那一秒。
+        #
+        # 原来的写法是 `if last_ms > first_ms` 才写 valid_until，理由是「只提过一次的
+        # 实体是一个瞬时点，给了会出现零长度区间」—— Explorer 的时间轴按 [from, until]
+        # 判定活跃，零长度等于任何时刻都不活跃，这个顾虑成立。
+        # 但「干脆不写」的代价是：那些实体从被提到的那一刻起**永远活跃**，
+        # 时间轴拖到最后，开头一次性的提及仍然算「正在谈」。实测 325 个实体里
+        # 只有 100 个有 valid_until，另外 225 个一直是全亮的。
+        # 用轮次结束做右端点两个毛病都没有：区间有长度，且它只在自己那一轮里活跃。
+        end_ms = turn_end.get(ent_last_turn.get(nid))
+        if not end_ms or end_ms <= first_ms:
+            end_ms = session_end if session_end and session_end > first_ms else last_ms
+        if end_ms > first_ms:
+            iso_until = _iso_local(end_ms)
             if iso_until:
                 props["valid_until"] = iso_until
 
