@@ -10,7 +10,7 @@
 // 本插件只负责把它拉起来、然后内嵌进侧边栏。
 // 这样功能上限就等于上游（6 个 workspace、78 个 /api 路由），而不是自绘一个子集。
 //
-// 内嵌走的是插件自己的 tab 类型（ExplorerView 自己渲染 iframe），
+// 内嵌走的是插件自己渲染的 iframe（ExplorerFrame），
 // 而不是 better-sidebar 的 'browser' tab —— 后者壳里有一条删不掉的状态行。
 // 详见 EXPLORER_IFRAME_SANDBOX 的注释。
 //
@@ -30,8 +30,6 @@ window.__ModuleLoader__.load({
 
 		/** 控制面板的 tab 类型。 */
 		const TAB_TYPE = "semantica:launcher";
-		/** 承载 Explorer 界面的 tab 类型（自己渲染 iframe，见 ExplorerView）。 */
-		const EXPLORER_TAB_TYPE = "semantica:explorer";
 		const NS = "semantica-graph";
 
 		/**
@@ -71,7 +69,6 @@ window.__ModuleLoader__.load({
 			"error.retry": "重试",
 			"error.detail": "详情",
 			"action.refresh": "重新抽取",
-			"action.reopen": "重新打开",
 			"stat.nodes": "节点",
 			"stat.edges": "边",
 			"stat.entities": "实体",
@@ -85,11 +82,9 @@ window.__ModuleLoader__.load({
 			"path.failed": "复制失败，请手动选中",
 			"action.dismiss": "关掉这条提示",
 			"state.emptyHint": "还没有图。点「重新抽取」开始。",
-			"action.reload": "刷新",
 			"action.external": "在浏览器打开",
 			"state.loading": "正在载入 Explorer…",
-			"view.noUrl": "这个标签没有拿到 Explorer 地址。关掉它，回到「知识图谱」面板点「重新打开」。",
-			"note.api": "Explorer 的 REST API",
+						"note.api": "Explorer 的 REST API",
 			"note.explorer": "上游 Explorer",
 			// 四个按钮只有 title 提示，所以「会新开一个对话」这件事必须写进 tooltip，
 			// 否则用户点下去才发现跳到别处了。
@@ -118,7 +113,6 @@ window.__ModuleLoader__.load({
 			"error.retry": "Retry",
 			"error.detail": "Details",
 			"action.refresh": "Re-extract",
-			"action.reopen": "Reopen",
 			"stat.nodes": "Nodes",
 			"stat.edges": "Edges",
 			"stat.entities": "Entities",
@@ -132,11 +126,8 @@ window.__ModuleLoader__.load({
 			"path.failed": "Copy failed — select it manually",
 			"action.dismiss": "Dismiss this notice",
 			"state.emptyHint": "No graph yet — press “Re-extract” on the right to build one.",
-			"action.reload": "Reload",
 			"action.external": "Open in browser",
 			"state.loading": "Loading the Explorer…",
-			"view.noUrl":
-				"This tab has no Explorer address. Close it and press “Reopen” in the Knowledge graph panel.",
 			"note.api": "Explorer REST API",
 			"note.explorer": "Upstream Explorer",
 			"analyze.tip": "Opens a new conversation, seeds it with this graph, then asks the AI to analyse it.",
@@ -231,11 +222,6 @@ window.__ModuleLoader__.load({
 .semg-action:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.07));color:var(--dsw-alias-label-primary,#222)}
 .semg-action-icon{opacity:.7;flex:none}
 .semg-action-text{overflow:hidden;text-overflow:ellipsis}
-.semg-view{display:flex;flex-direction:column;height:100%;min-height:0}
-.semg-viewbar{display:flex;align-items:center;gap:8px;padding:7px 10px;flex:0 0 auto;font-size:12px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12))}
-.semg-viewtitle{font-weight:600;flex:0 0 auto}
-.semg-viewurl{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dsw-alias-label-secondary,#888);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px}
-.semg-viewbar a.semg-btn{text-decoration:none}
 .semg-viewbody{position:relative;flex:1 1 auto;min-height:0}
 .semg-viewbody iframe{display:block;width:100%;height:100%;border:0}
 .semg-viewload{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:8px;pointer-events:none;color:var(--dsw-alias-label-secondary,#888);font-size:12px}
@@ -309,6 +295,40 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		/**
+		 * 外链图标：一个开口的方框，一支箭头从右上角射出去。
+		 *
+		 * 换掉了原来的「↗」。单独一个斜箭头在 UI 里至少有四种读法（分享 / 上传 /
+		 * 跳转 / 放大），配上「重新打开」「在浏览器打开」两个只有 hover 才出提示的图标，
+		 * 根本猜不出哪个是哪个。「方框 + 外射箭头」是「开去别处」的通用画法，不用猜。
+		 */
+		function IconExternal(props) {
+			const size = (props && props.size) || 16;
+			return h(
+				"svg",
+				{
+					width: size,
+					height: size,
+					viewBox: "0 0 16 16",
+					fill: "none",
+					"aria-hidden": "true",
+					className: props && props.className,
+				},
+				h("path", {
+					d: "M9.8 3.2H4A1.7 1.7 0 0 0 2.3 4.9v7A1.7 1.7 0 0 0 4 13.6h7a1.7 1.7 0 0 0 1.7-1.7V6.2",
+					stroke: "currentColor", strokeWidth: "1.3", strokeLinecap: "round", strokeLinejoin: "round",
+				}),
+				h("path", {
+					d: "M6.9 9.1 13.5 2.5",
+					stroke: "currentColor", strokeWidth: "1.3", strokeLinecap: "round",
+				}),
+				h("path", {
+					d: "M9.9 2.5h3.6v3.6",
+					stroke: "currentColor", strokeWidth: "1.3", strokeLinecap: "round", strokeLinejoin: "round",
+				}),
+			);
+		}
+
 		/** 复制成功的对勾。 */
 		function IconCheck(props) {
 			const size = (props && props.size) || 16;
@@ -377,24 +397,6 @@ window.__ModuleLoader__.load({
 
 		// ─────────────────────── 侧边栏（better-sidebar） ───────────────────────
 
-		/** 每个会话上一次给出的 Explorer 标签，好在端口变化时替换掉旧标签。 */
-		const lastTabBySession = new Map();
-
-		/**
-		 * meta.scope 的值：会话 + 端口。
-		 *
-		 * 端口进了去重键，是因为 Explorer 进程空闲回收后重启会换一个端口 ——
-		 * 那时旧标签指向的是已经死掉的地址，必须换成新标签。
-		 */
-		function explorerScope(sessionId, url) {
-			let port = "";
-			try {
-				port = new URL(url).port || "";
-			} catch {
-				// 畸形 url：退化成只按会话去重，至少不会每次都新开标签
-			}
-			return `${sessionId}@${port}`;
-		}
 
 		// ─────────────────── 跳到某个会话（新对话用） ───────────────────
 
@@ -420,44 +422,6 @@ window.__ModuleLoader__.load({
 			}
 		}
 
-		/** 在侧边栏里打开承载 Explorer 界面的标签。 */
-		function openExplorerTab(ctx, url, sessionId) {
-			const sb = ctx && typeof ctx.get === "function" ? ctx.get("betterSidebar") : null;
-			if (!sb || typeof sb.openTab !== "function") {
-				console.warn("[semantica-graph] betterSidebar 不可用，无法打开 Explorer 标签");
-				return false;
-			}
-			const scope = explorerScope(sessionId, url);
-			// openTab 会把 url 落到 tab.path 上（service.ts: path: seed.url），
-			// ExplorerView 从那里读回来。
-			const tabId = `${EXPLORER_TAB_TYPE}:${scope}`;
-			const prev = lastTabBySession.get(sessionId);
-			try {
-				// 换了端口：旧标签只会显示「连不上」，顺手关掉。
-				if (prev && prev.scope !== scope && typeof sb.closeTab === "function") {
-					try {
-						sb.closeTab(prev.tabId, { sessionId });
-					} catch {
-						// 关不掉不影响新标签，忽略
-					}
-				}
-				sb.openTab(
-					{
-						type: EXPLORER_TAB_TYPE,
-						id: tabId,
-						url,
-						title: T("tab.title"),
-						meta: { scope },
-					},
-					{ sessionId },
-				);
-				lastTabBySession.set(sessionId, { tabId, scope });
-				return true;
-			} catch (err) {
-				console.warn("[semantica-graph] 打开 Explorer 标签失败", err);
-				return false;
-			}
-		}
 
 
 		// ───────────────────────── 头部动作按钮 ─────────────────────────
@@ -680,8 +644,6 @@ window.__ModuleLoader__.load({
 			// AI 分析：哪个按钮在跑（null = 没跑），以及上一次的结果
 			const [busyKind, setBusyKind] = useState(null);
 			const [analysis, setAnalysis] = useState(null);
-			// 只是重新载入内嵌的 Explorer，不重跑抽取
-			const [reloadKey, setReloadKey] = useState(0);
 			const startedFor = useRef(null);
 			// 每次「收起 → 展开」只检查一次宽度。收起时重置，所以下次打开会再看一眼；
 			// 展开期间不重复触发，用户拖到哪儿就是哪儿，不会跟他抢。
@@ -709,8 +671,8 @@ window.__ModuleLoader__.load({
 						setPhase("ready");
 						// 刻意**不自动打开 Explorer 标签**。
 						//
-						// 以前这里是 `if (data.url) openExplorerTab(...)`，理由是
-						// 「用户点按钮就是为了看图」。但那会把刚打开的控制面板顶掉：
+						// 更早的版本在这里直接切到 Explorer 界面，理由是「用户点按钮就是为了看图」。
+						// 但那会把刚打开的控制面板顶掉：
 						// 第一次点头部图标 → 面板刚出现就被 Explorer 替换 → 用户看到
 						// 的是 semantica 的界面，面板底部的四个分析按钮压根没机会被看到
 						// （得再点一次图标才回得来）。
@@ -743,7 +705,22 @@ window.__ModuleLoader__.load({
 				if (startedFor.current === sessionId) return;
 				startedFor.current = sessionId;
 				run(false);
+				return;
 			}, [visible, sessionId, run]);
+
+			// 收起时清掉「这个会话已经 prepare 过」的标记，下次展开重来一次。
+			//
+			// 这不是多余的一次 IPC：Semantica 的 Explorer 闲置约 10 分钟会自己死掉，
+			// 那时面板里的 iframe 就一直是一张连不上的页面。重新 prepare 会让宿主
+			// 发现 worker 没了、重拉一个，拿到新端口 → url 变了 → iframe 重挂，自愈。
+			//
+			// 不会闪：渲染里 `phase === "working" && !url` 才显示加载态，已经有 url
+			// 时旧的图留在原地（见 LauncherView 的 return）。
+			//
+			// 以前这件事靠工具栏那个「刷新」按钮，按钮删了，改成本地自动做。
+			useEffect(() => {
+				if (!visible) startedFor.current = null;
+			}, [visible]);
 
 			// — 开子会话让 AI 分析 —
 			//
@@ -957,46 +934,32 @@ window.__ModuleLoader__.load({
 							),
 						),
 
-						// 图谱/视图控制。刷新保留文字（它是最常用的），其余收成图标 + title
+						// 只剩一个「在浏览器打开」。
+						//
+						// 这里原本还有「刷新」（重挂 iframe、不重跑抽取）和「重新打开」。刷新删掉后
+						// 面板内就没有手动重载入口了 —— 但那不是能力丢失：面板改成每次「收起 → 展开」
+						// 都重新 prepare 一次，Explorer 挂掉时宿主会重拉 worker、换新端口，url 变了
+						// iframe 自然重挂（见 LauncherView 里 startedFor 的注释）。
+						//
+						// 原本还有「重新打开」，在侧边栏另开一个整屏标签看图。那个按钮是它唯一的入口，
+						// 删掉之后 ExplorerView / openExplorerTab 那套就彻底到不了了，一并删了 ——
+						// 想恢复的话 git revert 这个提交就有，看大图用 ↗ 去浏览器。
 						h(
 							"div",
 							{ className: "semg-toolbar-util" },
 							url
 								? h(
-										"button",
-										{
-											type: "button",
-											className: "semg-btn",
-											title: T("action.reload"),
-											onClick: () => setReloadKey((k) => k + 1),
-										},
-										"\u21bb",
-									)
-								: null,
-							url
-								? h(
-										"button",
-										{
-											type: "button",
-											className: "semg-btn",
-											title: T("action.reopen"),
-											onClick: () => openExplorerTab(ctx, url, sessionId),
-										},
-										"\u2922",
-									)
-								: null,
-							url
-								? h(
-										"a",
-										{
-											className: "semg-btn",
-											href: url,
-											target: "_blank",
-											rel: "noreferrer",
-											title: T("action.external"),
-										},
-										"\u2197",
-									)
+									"a",
+									{
+										className: "semg-btn",
+										href: url,
+										target: "_blank",
+										rel: "noreferrer",
+										title: T("action.external"),
+									},
+									h(IconExternal, { size: 14 }),
+									T("action.external"),
+								)
 								: null,
 						),
 					),
@@ -1006,7 +969,7 @@ window.__ModuleLoader__.load({
 
 				// ————————————— 图 —————————————
 				url
-					? h(ExplorerFrame, { url, reloadKey })
+					? h(ExplorerFrame, { url })
 					: h(
 							"div",
 							{ className: "semg-viewbody semg-empty" },
@@ -1015,43 +978,28 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		// ───────────────────── Explorer 界面 tab ─────────────────────
-
-		/**
-		 * 承载 Semantica Knowledge Explorer 界面的 tab。
-		 *
-		 * 这里自己渲染 iframe，而不是交给 better-sidebar 的 browser tab。
-		 * 原因是它的 browser 视图里有一条**删不掉**的状态行：
-		 * `SandboxStatusBar` 是无条件渲染的（BrowserView.tsx），整个插件没有任何
-		 * 隐藏它的设置，只有「沙箱开＝绿杠」和「沙箱关＝红杠」两种状态。
-		 * 自己渲染就没有那层壳，顺带也不再需要用户去配 browserAllowedLoopback。
-		 *
-		 * URL 从 tab.path 读 —— openTab 会把 seed.url 落到这个字段上。
-		 */
 		// ─────────────────── 内嵌的 Explorer（iframe） ───────────────────
 
 		/**
 		 * 把 Semantica 的 Explorer 界面装进一个 iframe，自带加载遮罩。
 		 *
-		 * 从 `ExplorerView` 里抽出来的，好让控制面板能把「工具栏 + 图」拼成
-		 * 同一个页面 —— 以前这是两个标签页，用户得先看信息页、再手动点开图。
+		 * 控制面板用它把「工具栏 + 图」拼成同一个页面 —— 以前这是两个标签页，
+		 * 用户得先看信息页、再手动点开图。
 		 *
-		 * iframe 的 `key` 里带 url 和 reloadKey：换会话（url 变了）或点刷新都会
-		 * 重挂载。Explorer 是个 SPA，从外部没法调它的路由，只能整块重来。
+		 * iframe 的 `key` 就是 url：换会话时 url 变了就重挂载。
+		 * Explorer 是个 SPA，从外部没法调它的路由，只能整块重来。
 		 * 重挂载后 onLoad 会再触发一次，所以加载遮罩也要跟着复位。
 		 *
-		 * @param props.url        Explorer 基址（空串则不渲染）
-		 * @param props.reloadKey  外部递增这个数字即触发重新加载
+		 * @param props.url  Explorer 基址（空串则不渲染）
 		 */
 		function ExplorerFrame(props) {
 			const url = props.url || "";
-			const reloadKey = props.reloadKey || 0;
 			const [loaded, setLoaded] = useState(false);
 
-			// url 或 reloadKey 变了就把遮罩放回去，否则会一直显示上一张图
+			// url 变了就把遮罩放回去，否则会一直显示上一张图
 			useEffect(() => {
 				setLoaded(false);
-			}, [url, reloadKey]);
+			}, [url]);
 
 			return h(
 				"div",
@@ -1065,7 +1013,7 @@ window.__ModuleLoader__.load({
 							h("span", null, T("state.loading")),
 						),
 				h("iframe", {
-					key: `${url}#${reloadKey}`,
+					key: url,
 					src: url,
 					title: T("tab.title"),
 					sandbox: EXPLORER_IFRAME_SANDBOX,
@@ -1075,47 +1023,6 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		function ExplorerView(props) {
-			ensureStyles();
-			const tab = props.tab || {};
-			const url = typeof tab.path === "string" ? tab.path : "";
-			const [reloadKey, setReloadKey] = useState(0);
-
-			if (!url) {
-				return h(
-					"div",
-					{ className: "semg-panel" },
-					h("div", { className: "semg-box", "data-kind": "warn" }, T("view.noUrl")),
-				);
-			}
-
-			return h(
-				"div",
-				{ className: "semg-view" },
-				h(
-					"div",
-					{ className: "semg-viewbar" },
-					h(IconGraph, { size: 14 }),
-					h("span", { className: "semg-viewtitle" }, T("tab.title")),
-					h("span", { className: "semg-viewurl", title: url }, url),
-					h(
-						"button",
-						{
-							type: "button",
-							className: "semg-btn",
-							onClick: () => setReloadKey((k) => k + 1),
-						},
-						T("action.reload"),
-					),
-					h(
-						"a",
-						{ className: "semg-btn", href: url, target: "_blank", rel: "noreferrer" },
-						T("action.external"),
-					),
-				),
-				h(ExplorerFrame, { url, reloadKey }),
-			);
-		}
 
 		// ───────────────────────────── apply ─────────────────────────────
 
@@ -1232,7 +1139,7 @@ window.__ModuleLoader__.load({
 				if (svc && typeof svc.open === "function") sessionsSvc = svc;
 			});
 
-			// 3) 控制面板 tab + Explorer 界面 tab
+			// 3) 控制面板 tab
 			ctx.inject(["betterSidebar"], (sctx) => {
 				// 用 get() 而不是 sctx.betterSidebar —— 后者是服务属性访问，
 				// 正是「cannot get property "x" without inject」的触发方式。
@@ -1249,36 +1156,9 @@ window.__ModuleLoader__.load({
 						single: true,
 						component: LauncherView,
 					});
-					// Explorer 界面单独一个 tab 类型。它不出现在 tab 选择器里
-					// （没有 openTab 就没人会打开它），只是给 openExplorerTab 一个
-					// 不套 better-sidebar 浏览器壳的落点。
-					//
-					// 刻意**不用 single:true**：它的去重键是「描述符 id」这个常量，
-					// 与标签内容无关 —— 结果是把所有会话的 Explorer 合并成同一个
-					// 标签，而且 applyDedupe 命中已有标签时只做 activateTabReducer，
-					// **新的 url 会被直接丢弃**，于是切换会话后看到的还是上一个会话
-					// 的图。改用 meta.scope（会话+端口）作去重键。
-					const disposeExplorer = sidebar.registerTab({
-						id: EXPLORER_TAB_TYPE,
-						title: () => T("tab.title"),
-						icon: (size) => h(IconGraph, { size: size || 16 }),
-						order: 61,
-						// hidden 只影响「+」菜单（Sidebar 里是 .filter(d => !d.hidden ...)）,
-						// openTab 不检查它，所以按钮照常能打开。
-						// 不设的话「+」里会多一个重复的「知识图谱」入口，
-						// 点开是一个没有地址的空标签。
-						hidden: true,
-						dedupeKey: (tab) => {
-							const scope =
-								tab && tab.meta && typeof tab.meta === "object" ? tab.meta.scope : undefined;
-							return typeof scope === "string" ? scope : tab && tab.id;
-						},
-						component: ExplorerView,
-					});
 					return () => {
 						bridge.sidebar = null;
 						disposeLauncher();
-						disposeExplorer();
 					};
 				}, "semantica-graph: sidebar tab");
 			});
