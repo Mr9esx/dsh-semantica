@@ -359,7 +359,7 @@ iframe 还必须显式 `box-sizing:border-box`：否则那条 1px 边框会加�
 
 现在合成一个 `.semg-toolbar-row`：DOM 顺序是 信息 → 四个分析按钮 → 在浏览器打开，
 最后那组靠 `margin-left:auto` 推到最右。宽度不够时 `flex-wrap` 按这个顺序自然换行，
-**不按宽度写分支**。实测门槛 `ONE_ROW_MIN = 1280`（1200 还要两行，1280 就是一行）。
+**不按宽度写分支**。实测门槛 `ONE_ROW_MIN = 1300`（1298 还要两行，1300 就是一行）。
 
 尺寸统一到一组变量，在 `.semg-split,.semg-panel` 上定义一次：
 
@@ -377,6 +377,20 @@ iframe 还必须显式 `box-sizing:border-box`：否则那条 1px 边框会加�
 
 一个容易漏的点：按钮原来没写 `box-sizing`，所以 `height:26px` 加上 1px 上下边框
 **实际是 28px**。统一时一并补上 `box-sizing:border-box`，`height` 才是它字面的意思。
+
+字号也是同一种「同一行里不该有两种规格」的问题，分两次统一到 **12px**：
+
+| 元素 | 以前 | 现在 |
+| --- | --- | --- |
+| 统计数字 `.semg-mini b` | 12px | 12px |
+| 统计单位 `.semg-mini span`（节点/边/实体/关系） | 10px | **12px** |
+| 按钮文案 `.semg-btn`（重新抽取 / 四个分析 / 在浏览器打开） | 11px | **12px** |
+| 过期标记 `.semg-tag` | 14px → 12px | 12px |
+| 路径 chip `.semg-path code` | 10.5px | 10.5px（有意小一号：等宽、显示的是文件名不是文案） |
+
+改字号会连带改门槛 —— 第一行宽了约 20px，`CHIP_ONE_LINE_MIN` 700 → 752、
+带标记的 820 → 830、`ONE_ROW_MIN` 1280 → 1300。`visual-check` 里三条字号断言
+（统计数字 / 统计单位 / `.semg-btn`）就是为了让下次重构别把它悄悄改回去。
 
 `ONE_ROW_MIN` / `CHIP_ONE_LINE_MIN` 这类常数会随工具栏内容变，都在 `visual-check`
 里有对应断言，改布局时按实测值更新、别硬猜。

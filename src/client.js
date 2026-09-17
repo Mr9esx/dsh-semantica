@@ -172,7 +172,9 @@ const CSS = `
 .semg-card b{display:block;font-size:17px;font-weight:600;line-height:1.3}
 .semg-card span{font-size:10px;color:var(--dsw-alias-label-secondary,#888)}
 .semg-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.semg-btn{display:inline-flex;align-items:center;gap:4px;box-sizing:border-box;height:var(--semg-ctl-h,26px);padding:0 var(--semg-ctl-pad,10px);border-radius:var(--semg-ctl-radius,6px);border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));background:transparent;color:inherit;font-size:11px;cursor:pointer;white-space:nowrap}
+/* 按钮文案 12px —— 与面板正文 / 头部入口按钮 / 统计数字同一号，
+   以前是 11px，和同一行里的 12px 元素比会显得「缩了一号」。 */
+.semg-btn{display:inline-flex;align-items:center;gap:4px;box-sizing:border-box;height:var(--semg-ctl-h,26px);padding:0 var(--semg-ctl-pad,10px);border-radius:var(--semg-ctl-radius,6px);border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));background:transparent;color:inherit;font-size:12px;cursor:pointer;white-space:nowrap}
 .semg-btn:hover{background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.05))}
 .semg-btn[data-primary="1"]{border-color:var(--dsw-alias-brand-primary,#4d6bfe);color:var(--dsw-alias-brand-primary,#4d6bfe)}
 .semg-btn:disabled{opacity:.45;cursor:default}
@@ -210,7 +212,8 @@ const CSS = `
 .semg-toolbar-actions{display:flex;align-items:center;gap:var(--semg-ctl-gap,8px);flex-wrap:wrap;flex:0 1 auto;min-width:0}
 .semg-mini{display:inline-flex;align-items:baseline;gap:3px;white-space:nowrap}
 .semg-mini b{font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}
-.semg-mini span{font-size:10px;color:var(--dsw-alias-label-secondary,#888)}
+/* 数字和单位都 12px：以前单位是 10px，一行「3190 节点」里两种字号，看着像没做完。 */
+.semg-mini span{font-size:12px;color:var(--dsw-alias-label-secondary,#888)}
 .semg-tag{font-size:12px;box-sizing:border-box;height:var(--semg-ctl-h,26px);line-height:var(--semg-ctl-h,26px);padding:0 var(--semg-ctl-pad,10px);border-radius:999px;background:rgba(232,163,61,.16);color:#b57517;white-space:nowrap}
 /* 图文件路径。整条路径约 100 字符，工具栏放不下，所以显示的是省略形式（完整值在
    title 里，复制的也是完整值）。min-width:0 + overflow:hidden 让它能被压缩 ——

@@ -52,9 +52,11 @@ const STATS = {
 const WIDTHS = [420, 640, 780, 900, 1100, 1200, 1280, 1380]
 /**
  * 工具栏在这么宽以上应该排成**一行**（信息 + 四个分析按钮 + 在浏览器打开）。
- * 扫出来的：1380px 一行（工具栏 48px），1100px 还要两行（82px），门槛在中间。
+ * 扫出来的：1300px 一行（工具栏 48px），1298px 还要两行（82px），门槛就在中间。
+ * 演进：1280 → 1300 —— 统计单位和按钮文案从 10/11px 统一到 12px 之后，
+ * 第一行宽了约 20px（「重新抽取」+4px、四个统计的汉字单位 +14px 上下）。
  */
-const ONE_ROW_MIN = 1280
+const ONE_ROW_MIN = 1300
 /**
  * 路径 chip 能和统计数字同处一行的最小宽度。
  *
@@ -62,24 +64,25 @@ const ONE_ROW_MIN = 1280
  * （一行 48px → 两行 82px），直接吃掉 34px 的图区高度。
  *
  * ⚠️ 它会跟着工具栏里的内容走，改工具栏就得重量：
- *   700px  无「图已过期」标记（下面主循环量的就是这个）
- *   820px  有标记时（标记占 62px，把门槛推高 120px）
+ *   752px  无「图已过期」标记（下面主循环量的就是这个）
+ *   830px  有标记时（标记占 68px，把门槛推高 78px）
  * 演进：「重新抽取」按钮搬进第一行时 640 → 700；工具栏改成卡片（内容区窄 38px）
- * 之后带标记的那个从 780 → 820。
+ * 之后带标记的那个从 780 → 820；字号统一到 12px 之后 700 → 752、820 → 830。
  */
-const CHIP_ONE_LINE_MIN = 700
+const CHIP_ONE_LINE_MIN = 752
 /**
  * 第一行多一个「图已过期」标记时的门槛 —— 标记一出现就要到这个宽度 chip 才回得来。
  *
- * 这个数是**扫出来**的，不是算的。下面那段会扫 760~860 并把实测值跟这里对齐，
- * 所以布局一变就会报出来，不用去猜。
+ * 这个数是**扫出来**的，不是算的。下面那段会扫 800~860 并把实测值跟这里对齐，
+ * 所以布局一变就会报出来，不用去猜。这次的实测区间是 826 换行 / 827 同行，
+ * 取样网格只到 10px，所以常数取网格上第一个同行的 830。
  *
  * 一个诚实的提醒：这个门槛**对上下文敏感**。同一个 800px，用独立脚本扫是「同行」，
  * 放到本套件的页面里（堆了很多面板、有滚动条）却是「换行」，差 20px。所以这里钉住的
  * 是本套件这个上下文里的值；真实 GUI 的字体/滚动条情况未必完全一样，差几个像素是正常的。
- * 而且换行本身只是变高（工具栏 82px → 108px），不是错误。
+ * 而且换行本身只是变高（工具栏 82px → 116px），不是错误。
  */
-const CHIP_ONE_LINE_MIN_STALE = 820
+const CHIP_ONE_LINE_MIN_STALE = 830
 
 // PathChip 的 title 是「提示语 + 换行 + 完整路径」
 const TIP = '点击复制完整路径（这张图落盘的 JSON 文件）\n'
@@ -489,6 +492,38 @@ console.log('── 图谱标签：iframe 不重载 / 隐藏输入框 / 卡片�
 		TB && `L${TB.insetL} T${TB.insetT} R${TB.insetR}`)
 	check('工具栏不再只有「贴边下边框」', !!TB && TB.bottomBorder === '1px', TB && `下边框 ${TB.bottomBorder}`)
 
+	// ── 字号：12px 是这套工具栏的正文号 ──
+	//
+	// 主人提过两次字号（「图已过期」标记 14 → 12；统计数字与单位、按钮文案统一 12px），
+	// 而字号是**最容易被重构悄悄改掉**的东西 —— 布局断言全都量几何，字号小了 1px
+	// 只是整体窄一点，别的一条都不会红。所以这里把它钉住。
+	//
+	// 只管 `.semg-mini` 和 `.semg-btn`。路径 chip 是 `.semg-path`，里面显示的是文件名
+	// 而不是文案，走的是等宽字体 + 小一号（10.5px），有意不在这条规则里。
+	const FS = await page.evaluate(() => {
+		const px = (el) => (el ? getComputedStyle(el).fontSize : null)
+		const split = document.querySelector('.semg-split')
+		if (!split) return null
+		const minis = split.querySelectorAll('.semg-mini')
+		const btns = split.querySelectorAll('.semg-btn')
+		return {
+			// 四个统计：数字和单位都要 12px（单位以前是 10px）
+			miniNum: px(minis[0] && minis[0].querySelector('b')),
+			miniLabel: px(minis[0] && minis[0].querySelector('span')),
+			miniCount: minis.length,
+			miniLabelSizes: [...minis].map((m) => px(m.querySelector('span'))).filter(Boolean),
+			// 按钮文案：重新抽取 + 四个分析 + 在浏览器打开
+			btnSizes: [...btns].map((b) => px(b)),
+			btnTexts: [...btns].map((b) => b.textContent.trim()),
+		}
+	})
+	check('统计四个都渲染出来了', !!FS && FS.miniCount === 4, FS && String(FS.miniCount))
+	check('统计数字 12px', !!FS && FS.miniNum === '12px', FS && FS.miniNum)
+	check('统计单位 12px（四个都算）', !!FS && FS.miniLabelSizes.length === 4 && FS.miniLabelSizes.every((s) => s === '12px'),
+		FS && FS.miniLabelSizes.join(' / '))
+	check('按钮文案 12px（全部 .semg-btn）', !!FS && FS.btnSizes.length >= 5 && FS.btnSizes.every((s) => s === '12px'),
+		FS && `${FS.btnSizes.join(' / ')}  ← ${FS.btnTexts.join(' | ')}`)
+
 	// sandbox 是安全边界，别在重构里悄悄丢
 	const sb = String(r.mounted.status || '')
 	check('sandbox 仍含 allow-same-origin（缺它 SPA 白屏）', sb.includes('allow-same-origin'), sb)
@@ -549,6 +584,9 @@ for (const width of WIDTHS) {
 	)
 	if (width >= ONE_ROW_MIN) {
 		check('够宽时整条工具栏是一行（信息 + 按钮 + 在浏览器打开）', r.oneRow, `info.c / acts.c / util.c = ${c3(r)}`)
+	} else {
+		// 门槛以下必须真的折起来 —— 只断言「够宽时一行」的话，常数写成 420 也全绿。
+		check('不够宽时折成多行', !r.oneRow, `info.c / acts.c / util.c = ${c3(r)}`)
 	}
 	// 整列必须刚好填满：16(上内边距) + 工具栏 + 16(行距) + 画布 + 16(下内边距) = 720
 	check(
@@ -572,8 +610,8 @@ for (const width of WIDTHS) {
 
 // ── 「图已过期」标记对第一行的影响 ──
 //
-// 标记本身只有 72px，但它出现时第一行要装「图标 + 4 个统计 + 标记 + 重新抽取 + 路径 chip」，
-// chip 的同行门槛从 700px 被推到 840px。这个数会随着第一行的内容变，所以必须量、不能算。
+// 标记本身只有 68px，但它出现时第一行要装「图标 + 4 个统计 + 标记 + 重新抽取 + 路径 chip」，
+// chip 的同行门槛从 752px 被推到 830px。这个数会随着第一行的内容变，所以必须量、不能算。
 console.log('── 「图已过期」标记推高路径 chip 的门槛（扫描实测，两侧都断言）')
 //
 // 这个门槛**只能在同一个上下文里量**：我先用独立脚本扫出 800px 同行，搬到
@@ -581,7 +619,7 @@ console.log('── 「图已过期」标记推高路径 chip 的门槛（扫描
 // 所以这里不写死一个「两侧取样」，直接扫过去，然后把实测门槛跟常数对齐。
 {
 	const rows = []
-	for (const width of [760, 780, 800, 820, 840, 860]) {
+	for (const width of [800, 810, 820, 830, 840, 860]) {
 		const r = await renderPanel({ width, stats: STATS, stale: true })
 		const mini = r.mini
 		const sameLine = !!mini && Math.abs(r.chipT + r.chipH / 2 - (mini.t + mini.h / 2)) <= 2
@@ -655,6 +693,7 @@ for (const viewportW of [1380, 1100, 900]) {
 				text: btn ? btn.textContent.trim() : null,
 				btnW: b ? Math.round(b.width) : 0,
 				btnH: b ? Math.round(b.height) : 0,
+				fontSize: btn ? getComputedStyle(btn).fontSize : null,
 				clusterW: cluster ? Math.round(cluster.getBoundingClientRect().width) : 0,
 				titleClipped: crumbs ? crumbs.scrollWidth > crumbs.clientWidth + 1 : false,
 				overflowX: row.scrollWidth - row.clientWidth,
@@ -668,6 +707,7 @@ for (const viewportW of [1380, 1100, 900]) {
 	console.log(`   ${tag}  按钮 ${hr.btnW}×${hr.btnH}  标题区 ${hr.clusterW}  标题被截断=${hr.titleClipped}`)
 	check(`${tag}：按钮带文案「${hr.text}」`, hr.text === '知识图谱', String(hr.text))
 	check(`${tag}：按钮尺寸正常`, hr.btnW > 40 && hr.btnW <= 120 && hr.btnH === 22, `${hr.btnW}×${hr.btnH}`)
+	check(`${tag}：按钮文案 12px`, hr.fontSize === '12px', String(hr.fontSize))
 	check(`${tag}：整行不横向溢出`, hr.overflowX === 0, `溢出 ${hr.overflowX}px`)
 	check(`${tag}：标题区仍有空间（${hr.clusterW}px）`, hr.clusterW > 120, `${hr.clusterW}px`)
 	check(`${tag}：aria-label / title 都在`, !!hr.ariaLabel && !!hr.title, `${hr.ariaLabel} / ${hr.title}`)
