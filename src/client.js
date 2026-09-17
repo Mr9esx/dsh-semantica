@@ -71,6 +71,9 @@ window.__ModuleLoader__.load({
 			"state.claimByEntity": "按实体边认领 {n} 条决策",
 			"state.claimByTime": "按时间认领 {n} 条决策",
 			"state.untaggedNote": "图里还有 {n} 个节点没打会话标，只出现在「全部」里",
+			"state.hostMissing": "插件的 host 半侧还没加载",
+			"state.hostMissingHint":
+				"/api-semantica 没有任何路由响应。改过 host 代码（src/index.js 等）需要重启 DSH Desktop；只改浏览器半侧刷新页面即可。",
 			"state.explorerMissing": "Explorer 依赖不可用",
 			"state.mcpMissing": "MCP 工具没挂上：profile 里看不到 mcp-semantica 条目，模型写不进图。",
 			"analysis.title": "分析",
@@ -120,6 +123,9 @@ window.__ModuleLoader__.load({
 			"state.claimByEntity": "{n} decisions claimed by entity edges",
 			"state.claimByTime": "{n} decisions claimed by time",
 			"state.untaggedNote": "{n} nodes carry no conversation tag (visible under “All”)",
+			"state.hostMissing": "The plugin's host half is not loaded",
+			"state.hostMissingHint":
+				"Nothing answers /api-semantica. Host-side changes (src/index.js etc.) need a DSH Desktop restart; browser-side changes only need a refresh.",
 			"state.explorerMissing": "Explorer dependencies unavailable",
 			"state.mcpMissing": "MCP tools are not attached: no mcp-semantica row in the profile.",
 			"analysis.title": "Analysis",
@@ -216,9 +222,27 @@ window.__ModuleLoader__.load({
 
 		// ───────────────────────────── HTTP ─────────────────────────────
 
+		/**
+		 * 读一个 JSON 响应，并分清两种失败。
+		 *
+		 * 这里有个真实场景必须区分开：**host 半侧还没加载**（改了 src/index.js 但还没重启
+		 * DSH Desktop）时，`/api-semantica/*` 没有任何路由接管，Web 服务器会回一个 404 的
+		 * HTML 页面。直接 `res.json()` 的话报出来是「Unexpected token '<'」—— 用户看不懂，
+		 * 也不知道该干什么。所以这里按 content-type 判一下，给一个能照着做的错误码。
+		 */
+		async function readJson(res) {
+			const type = res.headers.get("content-type") ?? "";
+			if (!type.includes("application/json")) {
+				const err = new Error(`/api-semantica 没有响应（HTTP ${res.status}）`);
+				err.code = "host-missing";
+				throw err;
+			}
+			return res.json();
+		}
+
 		async function getJson(path) {
 			const res = await fetch(path, { headers: { accept: "application/json" } });
-			return res.json();
+			return readJson(res);
 		}
 
 		async function postJson(path, body) {
@@ -227,7 +251,7 @@ window.__ModuleLoader__.load({
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify(body ?? {}),
 			});
-			return res.json();
+			return readJson(res);
 		}
 
 		// ─────────────────── 内嵌的 Explorer（iframe） ───────────────────
@@ -658,6 +682,8 @@ window.__ModuleLoader__.load({
 			const [tab, setTab] = useState("overview");
 			const [analysis, setAnalysis] = useState(null);
 			const [analysisErr, setAnalysisErr] = useState(null);
+			// 走「采用已有 iframe」那条路时没有出图响应，统计数字就从这里补。
+			const [fallbackStats, setFallbackStats] = useState(null);
 			const [copied, setCopied] = useState(false);
 
 			const viewKey = mode + ":" + sessionId;
@@ -672,7 +698,7 @@ window.__ModuleLoader__.load({
 						);
 						if (alive) setStatus(data);
 					} catch (e) {
-						if (alive) setStatus({ ok: false, error: String(e?.message ?? e) });
+						if (alive) setStatus({ ok: false, code: e?.code ?? "request-failed", error: String(e?.message ?? e) });
 					}
 				})();
 				return () => {
@@ -694,6 +720,15 @@ window.__ModuleLoader__.load({
 					}
 					if (!force && frameHost.key === viewKey && frameHost.url) {
 						setView((prev) => prev ?? { url: frameHost.url, mode, adopted: true });
+						// 采用路径下没调过出图接口，所以没有统计数字 —— 不补的话切回来工具栏
+						// 会是一片「—」，看起来像坏了。这里补一次轻量的分析请求（不重启
+						// Explorer，也就不影响那个已经活着的 iframe）。
+						try {
+							const data = await postJson("/api-semantica/analysis", { sessionId, mode });
+							if (data.ok === true) setFallbackStats({ stats: data.stats, claim: data.claim });
+						} catch {
+							// 补不到就保持「—」，不打断已经显示出来的图
+						}
 						return;
 					}
 					setBusy(true);
@@ -710,7 +745,7 @@ window.__ModuleLoader__.load({
 						}
 					} catch (e) {
 						setView(null);
-						setErr({ ok: false, error: String(e?.message ?? e) });
+						setErr({ ok: false, code: e?.code ?? "request-failed", error: String(e?.message ?? e) });
 					} finally {
 						setBusy(false);
 					}
@@ -772,8 +807,8 @@ window.__ModuleLoader__.load({
 				}
 			}, [status]);
 
-			const stats = (view && view.stats) || (analysis && analysis.stats) || null;
-			const claim = (view && view.claim) || (analysis && analysis.claim) || null;
+			const stats = (view && view.stats) || (analysis && analysis.stats) || (fallbackStats && fallbackStats.stats) || null;
+			const claim = (view && view.claim) || (analysis && analysis.claim) || (fallbackStats && fallbackStats.claim) || null;
 			const kgPath = (status && status.kg && status.kg.path) || "";
 			const instruction = (status && status.instruction) || "";
 			const mcpMissing = Boolean(status && status.mcp && status.mcp.configured === false);
@@ -863,6 +898,8 @@ window.__ModuleLoader__.load({
 									!busy && err && err.code === "kg-missing"
 										? h(Btn, { onClick: copy }, copied ? T("action.copied") : T("action.copy"))
 										: null,
+									!busy && err && err.code === "host-missing" ? h("strong", null, T("state.hostMissing")) : null,
+									!busy && err && err.code === "host-missing" ? h("p", null, T("state.hostMissingHint")) : null,
 									!busy && err && err.code === "explorer-unavailable"
 										? h("strong", null, T("state.explorerMissing"))
 										: null,

@@ -118,8 +118,13 @@ const VIEW_URL = `${ORIGIN}${VIEW_PATH}`
 // 三个接口的假实现。空态那一条靠 Node 侧的 `emptyMode` 切 —— 不在 route 回调里
 // 调 page.evaluate（在请求处理中间反过来问页面，容易把自己绕死）。
 let emptyMode = false
+// hostMissing：模拟「改了 host 代码还没重启」—— 路由不存在，Web 服务器回 404 的 HTML。
+let hostMissing = false
 const requestLog = []
 await page.route('**/api-semantica/**', async (route, request) => {
+	if (hostMissing) {
+		return route.fulfill({ status: 404, contentType: 'text/html', body: '<!doctype html><title>404</title>not found' })
+	}
 	const url = request.url()
 	requestLog.push(`${request.method()} ${url.split('/api-semantica')[1]} empty=${emptyMode}`)
 	const body = JSON.parse(request.postData() || '{}')
@@ -325,6 +330,13 @@ await page.waitForTimeout(300)
 const remounted = await frameState()
 check('切回来还是同一个 iframe 元素（没重载）', remounted.iframeMark === 'same-node' && remounted.iframeCount === 1, `mark=${remounted.iframeMark}, count=${remounted.iframeCount}`)
 check('切回来后宿主重新显示', remounted.hostDisplay === 'block', String(remounted.hostDisplay))
+await page.waitForTimeout(300)
+const statsAfterReturn = (await page.textContent('[data-semgp-stats]')).replace(/\s+/g, ' ')
+check(
+	'切回来工具栏仍有数字（采用路径要靠补的那次请求填）',
+	statsAfterReturn.includes('42') && !statsAfterReturn.includes('—'),
+	statsAfterReturn,
+)
 
 // ── 横向溢出（工具栏是 flex-wrap 的，窄窗口必须不撑） ──
 
@@ -397,6 +409,43 @@ const emptyText = await page.textContent('[data-semgp-center]')
 check('空态给的是「本对话还没节点」，不是「图坏了」', emptyText.includes('本对话在图里还没有节点'), emptyText.replace(/\s+/g, ' ').slice(0, 80))
 check('空态给出可复制的提取指令', emptyText.includes('Semantica 知识图谱'), emptyText.replace(/\s+/g, ' ').slice(0, 60))
 check('空图时不渲染 Explorer（空画布不如一句解释）', emptyDebug.hasFrame === false, `frameHost=${emptyDebug.hasFrame}`)
+
+// ── host 半侧没加载时（改了 host 代码还没重启 DSH）要说人话 ──
+//
+// 这条最容易被忽略：路由不存在时 Web 服务器回的是 HTML，直接 res.json() 会报
+// 「Unexpected token '<'」，用户既看不懂也不知道该重启。
+
+// 这一段故意让三个接口回 404，浏览器必然打两条 "Failed to load resource" 控制台记录 ——
+// 那是这段测试自己造的噪音，不该记到「整轮没有 JS 报错」头上。所以这里标个起点，
+// 断言完把这段的噪音摘掉。
+const noiseStart = pageErrors.length
+hostMissing = true
+await page.evaluate(() => {
+	window.__root.unmount()
+	document.querySelectorAll('[data-semgp-frame-host]').forEach((n) => n.remove())
+})
+// 换一个会话 id：同 id 会走「采用已有 iframe」的捷径（那个 iframe 还活着），
+// 就测不到「接口根本不存在」这条路径了。
+await page.evaluate(() => window.__mount('session-visual-hostmissing'))
+await page.waitForTimeout(500)
+// 不用 page.textContent（它会等元素出现，等不到就 30 秒超时），这里容错读一次
+const hostMissingProbe = await page.evaluate(() => ({
+	text: document.querySelector('[data-semgp-center]')?.textContent ?? '',
+	rootHtml: (document.getElementById('root')?.innerHTML ?? '').slice(0, 200),
+	barText: document.querySelector('[data-semgp-bar]')?.textContent?.replace(/\s+/g, ' ') ?? null,
+}))
+console.log(`  · host 缺失现场：${JSON.stringify(hostMissingProbe)}`)
+const hostMissingText = hostMissingProbe.text
+check('host 没加载时给出可照做的提示', hostMissingText.includes('host 半侧还没加载') && hostMissingText.includes('重启 DSH Desktop'), hostMissingText.replace(/\s+/g, ' ').slice(0, 70))
+hostMissing = false
+{
+	const phaseErrors = pageErrors.splice(noiseStart)
+	check(
+		'host 缺失这一段只该有 404 噪音，没有别的报错',
+		phaseErrors.every((e) => e.includes('404')),
+		phaseErrors.join(' | ') || '（无）',
+	)
+}
 
 // ── 页面级错误 ──
 
