@@ -79,6 +79,9 @@ window.__ModuleLoader__.load({
 			"engine.label": "引擎",
 			"note.stale": "会话此后又有新内容，这张图是旧的。",
 			"note.staleShort": "图已过期",
+			"path.tip": "点击复制完整路径（这张图落盘的 JSON 文件）",
+			"path.copied": "已复制",
+			"path.failed": "复制失败，请手动选中",
 			"action.dismiss": "关掉这条提示",
 			"state.emptyHint": "还没有图。点右边的「重新抽取」开始。",
 			"action.reload": "刷新",
@@ -122,6 +125,9 @@ window.__ModuleLoader__.load({
 			"engine.label": "Engine",
 			"note.stale": "The conversation has grown since; this graph is stale.",
 			"note.staleShort": "Stale",
+			"path.tip": "Click to copy the full path of the graph file on disk",
+			"path.copied": "Copied",
+			"path.failed": "Copy failed — select it manually",
 			"action.dismiss": "Dismiss this notice",
 			"state.emptyHint": "No graph yet — press “Re-extract” on the right to build one.",
 			"action.reload": "Reload",
@@ -191,6 +197,14 @@ window.__ModuleLoader__.load({
 .semg-mini b{font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}
 .semg-mini span{font-size:10px;color:var(--dsw-alias-label-secondary,#888)}
 .semg-tag{font-size:10px;padding:1px 6px;border-radius:999px;background:rgba(232,163,61,.16);color:#b57517;white-space:nowrap}
+/* 图文件路径。整条路径约 100 字符，工具栏放不下，所以显示的是省略形式（完整值在
+   title 里，复制的也是完整值）。min-width:0 + overflow:hidden 让它能被压缩 ——
+   否则它自己不收缩，会把 .semg-toolbar-info 顶出容器。 */
+.semg-path{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:100%;padding:1px 6px;border-radius:5px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));background:transparent;color:inherit;font:inherit;cursor:pointer;overflow:hidden}
+.semg-path:hover{background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.05))}
+.semg-path code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.semg-path[data-state="copied"]{border-color:#3aa76d;color:#3aa76d}
+.semg-path[data-state="failed"]{border-color:var(--dsw-alias-state-error-primary,#d33);color:var(--dsw-alias-state-error-primary,#d33)}
 .semg-sep{width:1px;height:16px;background:var(--dsw-alias-border-l2,rgba(0,0,0,.14));margin:0 2px}
 .semg-spin-sm{width:11px;height:11px;border-width:1.5px}
 .semg-banner{display:flex;align-items:flex-start;gap:8px;padding:7px 10px;flex:0 0 auto;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.1));background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.03))}
@@ -248,6 +262,56 @@ window.__ModuleLoader__.load({
 					strokeWidth: "1.2",
 					strokeLinecap: "round",
 					opacity: "0.75",
+				}),
+			);
+		}
+
+		/**
+		 * 复制图标（两个错位的方框）。
+		 *
+		 * 用它而不是文件图标：这个 chip 的**动作**是复制，不是"打开文件" ——
+		 * 图标要提示点击之后会发生什么。
+		 */
+		function IconCopy(props) {
+			const size = (props && props.size) || 16;
+			return h(
+				"svg",
+				{
+					width: size,
+					height: size,
+					viewBox: "0 0 16 16",
+					fill: "none",
+					"aria-hidden": "true",
+					className: props && props.className,
+				},
+				h("rect", {
+					x: 5.6, y: 5.6, width: 8.2, height: 8.2, rx: 1.6,
+					stroke: "currentColor", strokeWidth: "1.3",
+				}),
+				h("path", {
+					d: "M10.4 5.4V3.8c0-.9-.7-1.6-1.6-1.6H3.8c-.9 0-1.6.7-1.6 1.6v5c0 .9.7 1.6 1.6 1.6h1.6",
+					stroke: "currentColor", strokeWidth: "1.3", strokeLinecap: "round",
+				}),
+			);
+		}
+
+		/** 复制成功的对勾。 */
+		function IconCheck(props) {
+			const size = (props && props.size) || 16;
+			return h(
+				"svg",
+				{
+					width: size,
+					height: size,
+					viewBox: "0 0 16 16",
+					fill: "none",
+					"aria-hidden": "true",
+					className: props && props.className,
+				},
+				h("path", {
+					d: "M3 8.4 6.3 11.7 13 5",
+					stroke: "currentColor", strokeWidth: "1.7",
+					strokeLinecap: "round", strokeLinejoin: "round",
 				}),
 			);
 		}
@@ -418,6 +482,97 @@ window.__ModuleLoader__.load({
 				{ className: "semg-mini", key: labelKey },
 				h("b", null, String(value ?? "—")),
 				h("span", null, T(labelKey)),
+			);
+		}
+
+		/** 中间省略：`session-c4f2f73e-08ac-…-f5b740.json` 这种，两头都保留。 */
+		function elideMiddle(text, max) {
+			if (!text || text.length <= max) return text || "";
+			const keep = max - 1;
+			const head = Math.ceil(keep / 2);
+			const tail = keep - head;
+			return text.slice(0, head) + "\u2026" + (tail > 0 ? text.slice(text.length - tail) : "");
+		}
+
+		/** 目录只留最后一级 + 中间省略的文件名 —— 完整路径放不进工具栏。 */
+		function shortenGraphPath(p) {
+			if (!p) return "";
+			const i = p.lastIndexOf("/");
+			if (i < 0) return elideMiddle(p, 48);
+			const dirTail = p.slice(0, i).split("/").filter(Boolean).slice(-1)[0] || "";
+			return "\u2026/" + dirTail + "/" + elideMiddle(p.slice(i + 1), 30);
+		}
+
+		/**
+		 * 图文件的落盘路径，点一下复制完整路径。
+		 *
+		 * 为什么要显示：这张图就是插件写到磁盘上的一个普通 JSON 文件。用户想自己拿去看
+		 * （编辑器打开、丢给别的工具、备份、对比两次抽取）是很自然的事，但之前路径在界面上
+		 * 完全不可见，只能去翻文档猜。
+		 *
+		 * 复制的是完整值，显示的才是省略值 —— 点一下拿到的必须是能直接 cd 过去的那种。
+		 */
+		function PathChip(props) {
+			const graphPath = props.path;
+			const [state, setState] = useState("idle"); // idle | copied | failed
+			const timer = useRef(0);
+
+			const flash = useCallback((next) => {
+				setState(next);
+				if (timer.current) clearTimeout(timer.current);
+				timer.current = setTimeout(() => setState("idle"), 1600);
+			}, []);
+
+			const copy = useCallback(() => {
+				const fallback = () => {
+					// navigator.clipboard 在非安全上下文里是 undefined；127.0.0.1 算安全上下文，
+					// 但 GUI 有可能被挂到别的 host 上，所以留一条退路。
+					try {
+						const ta = document.createElement("textarea");
+						ta.value = graphPath;
+						ta.setAttribute("readonly", "");
+						ta.style.position = "fixed";
+						ta.style.top = "-1000px";
+						ta.style.opacity = "0";
+						document.body.appendChild(ta);
+						ta.select();
+						const ok = document.execCommand("copy");
+						document.body.removeChild(ta);
+						flash(ok ? "copied" : "failed");
+					} catch (e) {
+						flash("failed");
+					}
+				};
+				try {
+					if (navigator.clipboard && navigator.clipboard.writeText) {
+						navigator.clipboard.writeText(graphPath).then(
+							() => flash("copied"),
+							() => fallback(),
+						);
+						return;
+					}
+				} catch (e) {
+					/* 落到 fallback */
+				}
+				fallback();
+			}, [graphPath, flash]);
+
+			useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+
+			if (!graphPath) return null;
+			const label =
+				state === "copied" ? T("path.copied") : state === "failed" ? T("path.failed") : null;
+			return h(
+				"button",
+				{
+					type: "button",
+					className: "semg-path",
+					"data-state": state,
+					title: T("path.tip") + "\n" + graphPath,
+					onClick: copy,
+				},
+				h(state === "copied" ? IconCheck : IconCopy, { size: 12 }),
+				h("code", null, label || shortenGraphPath(graphPath)),
 			);
 		}
 
@@ -645,6 +800,11 @@ window.__ModuleLoader__.load({
 								: h("span", { className: "semg-muted" }, T("state.empty")),
 							stale
 								? h("span", { className: "semg-tag", title: T("note.stale") }, T("note.staleShort"))
+								: null,
+							// 落盘路径。放在统计数字之后 —— 它和那几个数字一样是「这张图的元信息」，
+							// 而不是操作。点一下复制完整路径。
+							stats && stats.graphPath
+								? h(PathChip, { key: "path", path: stats.graphPath })
 								: null,
 						),
 

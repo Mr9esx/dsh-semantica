@@ -22,6 +22,7 @@
 
 import { createRequire } from 'node:module'
 import { readFileSync, mkdirSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -30,10 +31,24 @@ const APP = '/Applications/DSH Desktop.app/Contents/Resources/app'
 const OUT = join(REPO, 'tmp-visual')
 
 const EXPLORER = process.argv[2] || 'about:blank'
-const STATS = { nodes: 2186, edges: 2737, entities: 226, relations: 253, elapsed: 24.8, engine: { semantica: '0.6.8', python: '3.12' } }
+// graphPath 用真实的完整路径（~100 字符）—— 路径 chip 是最容易把工具栏撑宽的
+// 元素，用短假路径测等于没测。
+const STATS = {
+  nodes: 2186,
+  edges: 2737,
+  entities: 226,
+  relations: 253,
+  elapsed: 24.8,
+  engine: { semantica: '0.6.8', python: '3.12' },
+  graphPath:
+    '/Users/mr9esx/Library/Application Support/dsh-desktop/harness/dsh-semantica-graph/session-c4f2f73e-08ac-44f7-a6a8-050f4917b740.json',
+}
 
 // 侧边栏实际可能的宽度区间
 const WIDTHS = [300, 320, 420, 520, 640, 720]
+
+// PathChip 的 title 是「提示语 + 换行 + 完整路径」
+const TIP = '点击复制完整路径（这张图落盘的 JSON 文件）\n'
 
 function tryRequire(id, from) {
 	try {
@@ -52,15 +67,29 @@ if (!playwright) {
 const CLIENT = readFileSync(join(REPO, 'src/client.js'), 'utf8')
 mkdirSync(OUT, { recursive: true })
 
+// 页面必须从 http://127.0.0.1 提供，不能用 page.setContent ——
+// `navigator.clipboard` 只在**安全上下文**里存在，而 setContent 出来的页面是
+// about:blank，不是安全上下文。那样测出来的是"clipboard 是 undefined"，
+// 而真实 GUI 跑在 http://127.0.0.1:<port>，本来就有这个 API。
+const server = createServer((_req, res) => {
+	res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+	res.end(
+		'<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;background:#f6f7f9;font-family:-apple-system,"PingFang SC",sans-serif}</style></head><body><div id="host"></div></body></html>',
+	)
+})
+await new Promise((res) => server.listen(0, '127.0.0.1', res))
+const PORT = server.address().port
+
 const browser = await playwright.chromium.launch()
-const page = await browser.newPage()
+// 授剪贴板权限：路径 chip 的核心是「点一下复制**完整**路径」，
+// 只断言它显示了什么是不够的，得真点一次、读一次剪贴板。
+const context = await browser.newContext({ permissions: ['clipboard-read', 'clipboard-write'] })
+const page = await context.newPage()
 const errors = []
 page.on('console', (m) => { if (m.type() === 'error') errors.push(m.text()) })
 page.on('pageerror', (e) => errors.push(`pageerror: ${e.message}`))
 
-await page.setContent(
-	'<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;background:#f6f7f9;font-family:-apple-system,"PingFang SC",sans-serif}</style></head><body><div id="host"></div></body></html>',
-)
+await page.goto(`http://127.0.0.1:${PORT}/`)
 await page.addScriptTag({ path: `${APP}/node_modules/react/umd/react.development.js` })
 await page.addScriptTag({ path: `${APP}/node_modules/react-dom/umd/react-dom.development.js` })
 await page.evaluate(() => { window.__ModuleLoader__ = { load: (d) => { window.__plugin = d } } })
@@ -129,8 +158,29 @@ for (const width of WIDTHS) {
 				const i = rel(info), a = rel(acts)
 				overlap = i.t < a.t + a.h - 1 && a.t < i.t + i.h - 1 && i.l < a.l + a.w - 1 && a.l < i.l + i.w - 1
 			}
+			// 路径 chip：显示值应是省略形式，title 和剪贴板里应是完整值
+			const chip = q('.semg-path')
+			const chipText = chip ? (chip.querySelector('code') || {}).textContent || '' : null
+			const chipTitle = chip ? chip.getAttribute('title') || '' : null
+			let chipCopied = null
+			if (chip) {
+				chip.click()
+				await new Promise((res) => setTimeout(res, 120))
+				try {
+					chipCopied = await navigator.clipboard.readText()
+				} catch (e) {
+					chipCopied = `<读剪贴板失败: ${e.message}>`
+				}
+			}
+			const chipLabelAfter = chip ? (chip.querySelector('code') || {}).textContent || '' : null
+
 			return {
 				toolbarH: toolbar ? Math.round(toolbar.getBoundingClientRect().height) : 0,
+				chipText,
+				chipTitle,
+				chipCopied,
+				chipLabelAfter,
+				chipOverflowX: chip ? chip.scrollWidth - chip.clientWidth : 0,
 				overflowX: toolbar ? toolbar.scrollWidth - toolbar.clientWidth : 0,
 				frame: rel(frame),
 				iframe: rel(iframe),
@@ -149,6 +199,11 @@ for (const width of WIDTHS) {
 	check('渲染出内嵌 iframe', !!r.iframe)
 	check('统计四项齐全', r.stats.length === 4, r.stats.join(' '))
 	check('分析按钮四个齐全', r.buttons.length === 4, r.buttons.join(' | '))
+	check('图文件路径 chip 渲染出来了', typeof r.chipText === 'string' && r.chipText.length > 0)
+	check('显示的是省略形式（短于完整路径）', (r.chipText || '').length < STATS.graphPath.length, `${(r.chipText || '').length} vs ${STATS.graphPath.length}`)
+	check('title 里是完整路径', r.chipTitle === TIP + STATS.graphPath, r.chipTitle || '(空)')
+	check('点一下复制的是完整路径', r.chipCopied === STATS.graphPath, String(r.chipCopied).slice(0, 70))
+	check('复制后 chip 给出反馈文案', r.chipLabelAfter !== r.chipText, `「${r.chipLabelAfter}」`)
 	await page.locator(`#panel-${width}`).screenshot({ path: join(OUT, `panel-${width}.png`) })
 	console.log('')
 }
@@ -177,5 +232,7 @@ console.log(`\n控制台错误: ${errors.length}`)
 for (const e of errors.slice(0, 6)) console.log(`   ! ${e.slice(0, 140)}`)
 
 await browser.close()
+await browser.close()
+server.close()
 console.log(failures === 0 ? '\n✓ 可视化检查全部通过' : `\n✗ ${failures} 项失败`)
 process.exit(failures === 0 ? 0 : 1)
