@@ -61,8 +61,11 @@ const SAME_ROW_MIN = 600
  * 「重新抽取」按钮搬进第一行时，这个数从 640 涨到了 700。
  */
 const CHIP_ONE_LINE_MIN = 700
-/** 第一行多一个「图已过期」标记时的门槛 —— 标记一出现就要到这个宽度 chip 才回得来。 */
-const CHIP_ONE_LINE_MIN_STALE = 840
+/**
+ * 第一行多一个「图已过期」标记时的门槛 —— 标记一出现就要到这个宽度 chip 才回得来。
+ * 标记 12px 时宽 62px；标成 14px 会变 72px，门槛跟着涨到 840px。
+ */
+const CHIP_ONE_LINE_MIN_STALE = 780
 
 // PathChip 的 title 是「提示语 + 换行 + 完整路径」
 const TIP = '点击复制完整路径（这张图落盘的 JSON 文件）\n'

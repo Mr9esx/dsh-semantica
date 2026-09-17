@@ -191,7 +191,7 @@ window.__ModuleLoader__.load({
 .semg-mini{display:inline-flex;align-items:baseline;gap:3px;white-space:nowrap}
 .semg-mini b{font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}
 .semg-mini span{font-size:10px;color:var(--dsw-alias-label-secondary,#888)}
-.semg-tag{font-size:14px;line-height:20px;padding:0 8px;border-radius:999px;background:rgba(232,163,61,.16);color:#b57517;white-space:nowrap}
+.semg-tag{font-size:12px;line-height:18px;padding:0 7px;border-radius:999px;background:rgba(232,163,61,.16);color:#b57517;white-space:nowrap}
 /* 图文件路径。整条路径约 100 字符，工具栏放不下，所以显示的是省略形式（完整值在
    title 里，复制的也是完整值）。min-width:0 + overflow:hidden 让它能被压缩 ——
    否则它自己不收缩，会把 .semg-toolbar-info 顶出容器。 */
