@@ -19,7 +19,16 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 
-import { SCOPE_VERSION, analyze, readGraph, scopeGraph, summarize, writeGraphFile } from '../src/kg.js'
+import {
+	SCOPE_VERSION,
+	analyze,
+	readGraph,
+	removeFile,
+	scopeGraph,
+	sessionGraphPath,
+	summarize,
+	writeGraphFile,
+} from '../src/kg.js'
 import { ExplorerHost, probeExplorer, resolvePython } from '../src/explorer.js'
 import {
 	DIRECTIVE_VARIABLE,
@@ -586,6 +595,108 @@ if (viewRes.json.viewPath) {
 	const written = JSON.parse(readFileSync(viewRes.json.viewPath, 'utf8'))
 	check('视图文件形状对（graph_id/nodes/edges）', written.graph_id.startsWith('semantica-graph:') && Array.isArray(written.nodes) && Array.isArray(written.edges), `${written.nodes.length} 节点`)
 }
+
+// —— 本会话自己的物理图文件（C：写入按会话分文件）——
+//
+// 包装层 mcp/server.py 会把每次写入同时落到 <图目录>/sessions/<会话>.json。插件在「本对话」
+// 模式下**优先读这个文件**：它里面只有本会话写的东西，所以不需要按标认领，也不可能出现
+// 「节点被别的会话覆盖标、于是本会话视图里少一个」。
+const sessDir = join(kgDir, 'sessions')
+const sessFile = sessionGraphPath(join(kgDir, 'kg.json'), SESSION_A)
+check(
+	'会话文件路径 = 图目录/sessions/<会话>.json',
+	sessFile === join(sessDir, `${SESSION_A}.json`),
+	String(sessFile),
+)
+check(
+	'会话 id 里的路径成分被净化掉（id 来自模型可写的 metadata，不能当路径用）',
+	sessionGraphPath('/x/kg.json', '../../evil/id') === '/x/sessions/evil_id.json' &&
+		sessionGraphPath('/x/kg.json', '') === null,
+	String(sessionGraphPath('/x/kg.json', '../../evil/id')),
+)
+
+mkdirSync(sessDir, { recursive: true })
+// 故意让 esbuild 在会话文件里是 A 的版本，而合并图里它是 B 的（真实事故的形状）
+writeFileSync(
+	sessFile,
+	JSON.stringify({
+		graph_id: 'semantica-graph:own:A',
+		nodes: [
+			{ id: 'only-a', type: 'Own', properties: { label: 'A 自己的节点', content: 'only-a' } },
+			{ id: 'esbuild', type: 'BundleA', properties: { label: 'A 的 esbuild 写法', content: 'esbuild' } },
+			{ id: 'a-decision', type: 'decision', properties: { category: 'A 的决策', outcome: 'done' } },
+		],
+		edges: [
+			{ source_id: 'only-a', target_id: 'esbuild', type: 'USES' },
+			// 悬空边：端点只有合并图里有 —— 视图必须把它清掉（同一类 bug 犯过一次就够）
+			{ source_id: 'only-a', target_id: 'not-here', type: 'BROKEN' },
+		],
+		links: [],
+	}),
+)
+
+const ownStatus = await call('/api-semantica/status', { query: `?sessionId=${SESSION_A}` })
+check(
+	'status 报出本会话文件的路径 + 存在 + 计数',
+	ownStatus.json.session?.path === sessFile &&
+		ownStatus.json.session?.exists === true &&
+		ownStatus.json.session?.nodes === 3 &&
+		ownStatus.json.session?.edges === 2,
+	JSON.stringify(ownStatus.json.session),
+)
+
+const ownView = await call('/api-semantica/view', { body: { sessionId: SESSION_A, mode: 'conversation' } })
+check('有会话文件时，「本对话」直接读它', ownView.json.source === 'session-file', String(ownView.json.source))
+check(
+	'读到的是这个会话自己的 3 个节点（不是合并图里挑出来的）',
+	ownView.json.stats?.nodes === 3 && ownView.json.stats?.edges === 1,
+	JSON.stringify({ n: ownView.json.stats?.nodes, e: ownView.json.stats?.edges }),
+)
+check(
+	'悬空边被清掉，但计数留给诊断（claim.droppedEdges）',
+	ownView.json.claim?.droppedEdges === 1,
+	JSON.stringify(ownView.json.claim),
+)
+{
+	const written = JSON.parse(readFileSync(ownView.json.viewPath, 'utf8'))
+	const esb = written.nodes.find((n) => n.id === 'esbuild')
+	check(
+		'★ A 的视图里 esbuild 是 A 的版本（合并图里它已经被 B 覆盖）',
+		esb?.type === 'BundleA',
+		JSON.stringify(written.nodes.map((n) => [n.id, n.type])),
+	)
+	check(
+		'视图里没有合并图独有的节点（物理隔离，不是筛出来的）',
+		!written.nodes.some((n) => n.id === 'vue' || n.id === 'loose'),
+		JSON.stringify(written.nodes.map((n) => n.id)),
+	)
+	check(
+		'视图里也没有那条悬空边',
+		!written.edges.some((e) => e.target_id === 'not-here'),
+		JSON.stringify(written.edges.map((e) => [e.source_id, e.target_id])),
+	)
+}
+
+// 把会话文件删掉 → 退回「在合并图上按标筛」，行为与接通前一致（包装层没装也不能崩）
+removeFile(sessFile)
+const fallbackStatus = await call('/api-semantica/status', { query: `?sessionId=${SESSION_A}` })
+check(
+	'没有会话文件时 status 明说「不存在」（界面才能解释为什么是筛出来的）',
+	fallbackStatus.json.session?.path === sessFile && fallbackStatus.json.session?.exists === false,
+	JSON.stringify(fallbackStatus.json.session),
+)
+const fallbackView = await call('/api-semantica/view', { body: { sessionId: SESSION_A, mode: 'conversation' } })
+check(
+	'退回按标筛，节点数回到切图结果',
+	fallbackView.json.source === 'merged-scope' && fallbackView.json.stats?.nodes === scopedA.nodes.length,
+	JSON.stringify({ source: fallbackView.json.source, n: fallbackView.json.stats?.nodes, want: scopedA.nodes.length }),
+)
+const allView = await call('/api-semantica/view', { body: { sessionId: SESSION_A, mode: 'all' } })
+check(
+	'「全部」永远不读会话文件（它就是整张合并图）',
+	allView.json.source === 'merged-scope' && allView.json.session === null,
+	JSON.stringify({ source: allView.json.source, session: allView.json.session }),
+)
 
 const anaRes = await call('/api-semantica/analysis', { body: { sessionId: SESSION_A, mode: 'conversation' } })
 check('analysis 返回分析结果', anaRes.json.ok === true && anaRes.json.analysis?.decisions?.length === 1, JSON.stringify({ ok: anaRes.json.ok, d: anaRes.json.analysis?.decisions?.length }))

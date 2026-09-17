@@ -204,6 +204,42 @@ add_relationship(source, target, type, metadata = { "conversation": "<sessionId>
 
 ## 二、怎么切出「本对话」这张图
 
+### 2.1 先看有没有「本会话自己的文件」（写入按会话分文件）
+
+MCP 那边的存储假设原本是「一台机器一张图」：一个 `SEMANTICA_KG_PATH`，所有会话的写入落进
+同一个文件。真实事故：会话 A 先写 `guangzhou`（type=Location + user_city），会话 B 之后也写
+`guangzhou`（type=City），而 semantica 的 `add_entity` 是**整套 metadata 替换** —— A 的字段没了，
+A 的「本对话」视图跟着少一个节点（还留下过一条端点消失的悬空边）。
+
+所以写入改成了**按会话分文件**（`mcp/server.py`，我们自己的包装层）：
+
+| 文件 | 谁写 | 谁读 |
+| --- | --- | --- |
+| `<图目录>/kg.json` | 每次写入都落一份（合并图） | 「全部」视图、`query_graph` 等读工具 |
+| `<图目录>/sessions/<会话>.json` | 只有**属于这个会话**的写入 | 「本对话」视图 |
+
+包装层**不复制上游语义**：它 import `semantica.mcp_server` 的工具表与 stdio 循环，只把 5 个写
+工具（`add_entity` / `add_relationship` / `record_decision` / `update_node` / `delete_node`）的
+handler 包一层 —— 先照旧写合并图，再把上游的图对象与落盘路径**临时**切到会话文件、跑**同一个
+handler**。敢这么干是因为上游每个写 handler 都是**在调用时**读 `SEMANTICA_KG_PATH` 并
+`save_to_file`，而且自带「落盘失败回滚内存」。
+
+**读工具不路由**：`query_graph` / `query_decisions` / `find_precedents` 看的仍是合并图 ——
+跨会话复用（同一条知识不重复建节点）必须保留。
+
+会话归属怎么认：`add_*` 用 `metadata.conversation`；`record_decision` / `update_node` /
+`delete_node` 优先用显式参数 `conversation`（包装层给这三个工具的 schema 加了它，提示词也要求
+带），拿不到就按 `entities` / `node_id` 去合并图查节点带的标；**都拿不到就只写合并图**（不猜）。
+
+已知边界（诚实说）：如果某个 id 的标已经被别的会话覆盖，那么之后按 `entities` 推出来的归属会
+跟着**新标**走 —— MCP 里没有调用方身份，只能从数据推。所以提示词要求显式传 `conversation`。
+另外**包装层之前**写过的老会话没有自己的文件，插件会退回「在合并图上按标筛」（见 2.2）。
+
+退回官方 server：`node scripts/install.mjs --upstream`（改的是 profile 里的 MCP command，
+**要重启 DSH Desktop** 才生效）。
+
+### 2.2 没有自己的文件时，退回按标筛
+
 `src/kg.js` 的 `scopeGraph()`，`mode: 'conversation'` 时：
 
 1. 留下**打了本会话标**的节点和边；
@@ -220,7 +256,14 @@ add_relationship(source, target, type, metadata = { "conversation": "<sessionId>
 
 切不干净的部分**如实报出来**，不假装没有：工具栏底下那行会写「本对话 N 个节点 ·
 按实体边认领 N 条决策 · 图里还有 N 个节点没打会话标」。
-`mode: 'all'` 就是整张图，什么都不切。
+`mode: 'all'` 就是整张图，什么都不切，也**永远不读**会话文件。
+
+路由规则一句话：**本对话有 `sessions/<会话>.json` 就直接读它**（它里面只有本会话写的东西，
+不需要认领逻辑），**没有就退回上面这套按标筛**。哪种情况从 `/view` 与 `/analysis` 的
+`source` 字段就能看出来（`session-file` / `merged-scope`），工具栏上显示与复制的路径也跟着换：
+读会话文件时是那条 `sessions/...json`，退回时是合并图，并且 tooltip 里会写清「本对话的文件
+在哪儿、还不存在」。会话文件里若有指向本会话没写过的节点的边，会当作悬空边清掉（计数留在
+`claim.droppedEdges`，只进诊断）。
 
 每张切好的图写成 `<harness>/dsh-semantica-graph/views/view-<key>.json`，再交给 Explorer。
 `semantica.explorer --graph` 是**启动时读一次**，所以图变了就得重启那个子进程 ——
@@ -293,15 +336,25 @@ Explorer 有多个 workspace、78 个 `/api` 路由。自己画一张图画得�
 ```bash
 node scripts/install.mjs            # 安装（改 profile 前会备份）
 node scripts/install.mjs --dry-run  # 只打印要做什么
+node scripts/install.mjs --upstream # 退回官方 semantica-mcp（不分会话文件）
 node scripts/install.mjs --remove   # 移除
 ```
+
+安装做三件事：profile 的 `package.json` 链接插件、把包装层
+（`mcp/server.py` → `<harness>/dsh-semantica-mcp/server.py`，并建好 `sessions/` 目录）、
+以及把 MCP 条目写成 `python <包装层>` 并带上 `SEMANTICA_KG_PATH` 与
+`DSH_SEMANTICA_SESSIONS_DIR`。**这两个环境变量必须指向同一份图目录** —— 包装层按前者算
+`sessions/`，插件按后者算，两边不一致时插件会静默退回按标筛（`mcp/selftest.py` 里有一条
+断言专门盯这个契约）。
 
 前置：`<harness>/semantica-venv` 里装了 `semantica`（含 `semantica-mcp` 与
 `semantica.explorer` 需要的 `fastapi`/`uvicorn`）。脚本找不到那个解释器会直说。
 解释器位置也可以用 `DSH_SEMANTICA_PYTHON` 覆盖。
 
 **改完 host 半侧（`src/index.js` 等）必须重启 DSH Desktop 才生效**；浏览器半侧
-（`src/client.js`）是从源码加载的，改完刷新页面即可。
+（`src/client.js`）是从源码加载的，改完刷新页面即可。**换了 MCP command（装包装层 /
+`--upstream`）也必须重启**：MCP 子进程是按 profile 起来的，不重启就还是旧的那条命令，
+`sessions/` 里会一直空着、面板如实退回显示合并图。
 
 ## 六、自检
 
@@ -309,6 +362,7 @@ node scripts/install.mjs --remove   # 移除
 npm run check      # 六个源文件过一遍 node --check
 npm run selftest   # 离线全链路：造图 → 切图 → 分析 → 起真 Explorer → 假 ctx 跑真路由
 npm run visual     # 真 Chromium：12px、iframe 宿主、窄窗口溢出、抽屉、空态
+"$DSH_SEMANTICA_PYTHON" mcp/selftest.py   # 包装层：起真 MCP 子进程走真 JSON-RPC
 ```
 
 - `selftest` 不启动 DSH，也不需要真会话：用插件 venv 里的 semantica 造一张图（两个会话
@@ -316,9 +370,22 @@ npm run visual     # 真 Chromium：12px、iframe 宿主、窄窗口溢出、抽
   的决策 + 一条 30 天前的决策），然后直接调 `src/index.js` 注册出来的真路由 handler。
 - `visual` 把 `src/client.js` 原样塞进一个真 Chromium 页面（配假的
   `window.__ModuleLoader__` 和三个假接口），**量**计算样式而不是看截图。
+- `mcp/selftest.py` 不碰真图：在临时目录里起一个真的 server 子进程，用真的 JSON-RPC 走一遍，
+  并且**复现那个事故剧本**（A 先写 `guangzhou`，B 用同一个 id 覆盖）—— 断言合并图里确实被
+  覆盖了、A 的会话文件里 A 那份一个字段都没少。
 
 ## 七、已知边界
 
+- **包装层没装 / 没重启时**，`sessions/` 是空的，「本对话」退回按标筛 —— 行为与从前一致，
+  面板的路径 tooltip 会写清「本对话的文件在哪儿、还不存在」。
+- **包装层之前写过的老会话没有自己的文件**（只能退回按标筛，因此仍然带着「节点被覆盖标」
+  那个老问题）。没有自动回填：按标回填出来的文件对已经被覆盖的数据也只能是残缺的，
+  与其假装完整，不如让面板说清它现在是哪种来源。
+- **自动归属会跟着「现在的标」**：某个 id 的标被别的会话改写后，之后按 `entities` 推出来的
+  归属就是那个新会话 —— MCP 里没有调用方身份。提示词因此要求显式传 `conversation`。
+- **写仍是「先合并图、再会话文件」两次落盘**：会话文件写失败只记日志，不影响模型看到的结果
+  （宁可少一份副本，也不能让写入报错）。两次落盘之间崩掉的话，合并图有、会话文件没有 ——
+  这时「本对话」退回按标筛，仍然看得到内容。
 - **没带 `entities` 的决策进不了「本对话」**（只出现在「全部」里）。这是刻意的：另一种
   做法（按时间猜）会把别的会话的决策算进来，用户已经踩过一次。模型按提示词传
   `entities` 时不受影响。

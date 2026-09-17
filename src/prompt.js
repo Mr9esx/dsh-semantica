@@ -85,6 +85,9 @@ function rules(sessionId) {
 		'用户确认过的选择用 record_decision 记录：category 填问题标题、scenario 填背景、reasoning 填依据、',
 		'outcome 填用户选了什么、confidence=1.0、decision_maker="user"，并且**必须**把相关节点 id 放进 entities',
 		'—— 决策没有 metadata，它靠这些实体边归属到本会话。',
+		`另外，record_decision / update_node / delete_node 都要再显式传一个 conversation="${sessionId}"：`,
+		'知识图谱按会话分文件存（每个会话一个文件），这三个工具没有 metadata 可带，',
+		'只有显式传 conversation 才能保证这次写入落进本会话自己的文件里，不会被别的会话蹭走。',
 	]
 }
 
@@ -121,6 +124,7 @@ export function instructionFor(sessionId) {
 		`1. 本会话标识是 ${sessionId}，add_entity / add_relationship 都要带上 metadata={"conversation": "${sessionId}"}。`,
 		'2. 先 extract_entities / extract_relations 抽（中文传 model="zh_core_web_sm"），再用 add_entity / add_relationship 写入；id 用可读稳定的字符串。',
 		'3. 我确认过的选择用 record_decision 记录（category/scenario/reasoning/outcome/confidence=1.0/decision_maker="user"），entities 里放相关节点 id。',
+		`   record_decision / update_node / delete_node 记得再传 conversation="${sessionId}"，否则这次写入可能落到别的会话的文件里。`,
 		'4. 只写值得以后复用的东西，不要为琐碎内容建节点。',
 	].join('\n')
 }

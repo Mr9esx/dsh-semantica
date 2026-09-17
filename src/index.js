@@ -28,6 +28,8 @@ import {
 	graphMtime,
 	readGraph,
 	scopeGraph,
+	scopeOwnGraph,
+	sessionGraphPath,
 	summarize,
 	writeGraphFile,
 } from './kg.js'
@@ -261,6 +263,24 @@ async function loadScoped(ctx, sessionId, mode) {
 	// 路径以 profile 里写死的 SEMANTICA_KG_PATH 为准（见 resolveKgPath 的注释）
 	const resolved = resolveKgPath(home)
 	const path = resolved.path
+
+	// 本对话：如果这个会话有自己的物理图文件（包装层 mcp/server.py 按会话写的），**直接读它**。
+	// 它就是这个会话的全部内容，不需要按标认领，也不可能被别的会话覆盖 —— 这是 C 买到的东西。
+	// 读不到就退回「在合并图上按标筛」（没接通包装层、或这个会话在包装层之前就写过东西）。
+	const own = mode === 'conversation' ? sessionGraphPath(path, sessionId) : null
+	if (own) {
+		const ownGraph = readGraph(own)
+		if (ownGraph) {
+			return {
+				graph: ownGraph,
+				scoped: scopeOwnGraph(ownGraph),
+				home,
+				kg: { path, source: resolved.source, mtime: graphMtime(path), bytes: ownGraph.bytes },
+				session: { path: own, exists: true, nodes: ownGraph.nodes?.length ?? 0, edges: ownGraph.edges?.length ?? 0 },
+			}
+		}
+	}
+
 	const graph = readGraph(path)
 	if (!graph) {
 		const err = new Error('图文件还不存在')
@@ -274,6 +294,9 @@ async function loadScoped(ctx, sessionId, mode) {
 		scoped,
 		home,
 		kg: { path, source: resolved.source, mtime: graphMtime(path), bytes: graph.bytes },
+		// 会话文件不存在（或这条路不走会话文件）时也告诉界面：它能说清「为什么这里显示的是
+		// 合并图里挑出来的」，而不是让用户以为接通了
+		session: own ? { path: own, exists: false, nodes: 0, edges: 0 } : null,
 	}
 }
 
@@ -384,6 +407,26 @@ function apply(ctx, config) {
 							nodes,
 							edges,
 						},
+						// 本会话自己的图文件（包装层写的）。界面据此知道「本对话」读的是哪一份，
+						// 也回答了用户那句「为什么所有知识图谱都是一样的路径」
+						session: (() => {
+							const own = sessionId ? sessionGraphPath(path, sessionId) : null
+							if (!own) return null
+							let ownNodes = 0
+							let ownEdges = 0
+							let ownExists = false
+							try {
+								const g = readGraph(own)
+								if (g) {
+									ownExists = true
+									ownNodes = g.nodes?.length ?? 0
+									ownEdges = g.edges?.length ?? 0
+								}
+							} catch {
+								// 读不出来就当没有
+							}
+							return { path: own, exists: ownExists, nodes: ownNodes, edges: ownEdges }
+						})(),
 						mcp: { configured: mcpConfigured(home) },
 						explorer: {
 							ok: probe.ok,
@@ -492,7 +535,7 @@ function apply(ctx, config) {
 						return
 					}
 
-					const { scoped, kg } = await loadScoped(ctx, sessionId, mode)
+					const { scoped, kg, session } = await loadScoped(ctx, sessionId, mode)
 					// key 里带规则版本：规则改了，旧视图文件和旧 Explorer 实例就都不再匹配
 					const key = `${mode === 'all' ? 'all' : `conversation:${sessionId}`}:v${SCOPE_VERSION}`
 					const out = viewPath(home, key)
@@ -507,6 +550,9 @@ function apply(ctx, config) {
 						key,
 						stats: summarize(scoped.nodes, scoped.edges),
 						claim: scoped.claim,
+						// 视图数据是哪来的：本会话自己的文件，还是在合并图上按标筛出来的
+						source: scoped.source ?? 'merged-scope',
+						session,
 						kg: { path: kg.path, mtime: kg.mtime, bytes: kg.bytes },
 						viewPath: out,
 						ms: Date.now() - started,
@@ -541,10 +587,13 @@ function apply(ctx, config) {
 						send(res, 200, { ok: false, code: 'no-session', error: '没拿到会话 id' })
 						return
 					}
-					const { scoped } = await loadScoped(ctx, sessionId, mode)
+					const { scoped, session } = await loadScoped(ctx, sessionId, mode)
 					send(res, 200, {
 						ok: true,
 						mode,
+						// 前端「采用已有 iframe」时只调这个接口，所以来源信息也得从这里回去
+						source: scoped.source ?? 'merged-scope',
+						session,
 						stats: summarize(scoped.nodes, scoped.edges),
 						claim: scoped.claim,
 						analysis: analyze(scoped.nodes, scoped.edges),

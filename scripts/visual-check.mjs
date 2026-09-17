@@ -36,6 +36,8 @@ const STATS = { nodes: 42, edges: 51, entities: 30, relations: 38, decisions: 4,
 // byEdge = 「我这次写过的边连到的节点」数（节点被别的会话抢走标之后，靠它把节点拉回视图）
 const CLAIM = { tagged: 30, byEdge: 1, byEntity: 2, untagged: 3, totalSemantic: 33, untaggedDecisions: 2 }
 const KG = { path: '/tmp/harness/dsh-semantica-graph/kg.json', mtime: Date.now(), bytes: 4096 }
+// 本会话自己的那份图为文件（sessions/<会话>.json）
+const SESSION_KG = { path: '/tmp/harness/dsh-semantica-graph/sessions/session-stub-0001.json', exists: true, nodes: 5, edges: 4 }
 const VIEW_PATH = '/graph-view'
 
 const ANALYSIS = {
@@ -65,6 +67,13 @@ const STATUS = {
 	ok: true,
 	// source = 这个路径是哪来的（host 从 profile 里读的）；界面 tooltip 会说出来
 	kg: { path: KG.path, source: 'profile:web', nonDefault: false, exists: true, mtime: KG.mtime, nodes: 42, edges: 51 },
+	// 本会话自己的图文件（包装层按会话写的）。界面据此显示「本对话读的是哪一份」
+	session: {
+		path: SESSION_KG.path,
+		exists: true,
+		nodes: 5,
+		edges: 4,
+	},
 	mcp: { configured: true },
 	explorer: { ok: true, version: '0.6.8', python: '/x/python', missing: [], hint: null, running: [] },
 	prompt: { injected: true, section: 'plugin:semantica-graph', directive: 'semantica_directive' },
@@ -185,6 +194,9 @@ await page.route('**/api-semantica/**', async (route, request) => {
 					stats: { ...STATS, nodes: 0, edges: 0, entities: 0, relations: 0, decisions: 0 },
 					claim: { tagged: 0, byEdge: 0, byEntity: 0, untagged: 3, totalSemantic: 33, untaggedDecisions: 2 },
 					kg: KG,
+					// 空态走的是「还没有本会话文件」那条路（退回在合并图上按标筛）
+					source: 'merged-scope',
+					session: { ...SESSION_KG, exists: false, nodes: 0, edges: 0 },
 					ms: 12,
 				},
 			})
@@ -198,11 +210,26 @@ await page.route('**/api-semantica/**', async (route, request) => {
 				stats: STATS,
 				claim: CLAIM,
 				kg: KG,
+				source: 'session-file',
+				session: SESSION_KG,
 				ms: 37,
 			},
 		})
 	}
-	if (url.includes('/analysis')) return route.fulfill({ json: { ok: true, mode: body.mode, stats: STATS, claim: CLAIM, analysis: ANALYSIS, ms: 21 } })
+	if (url.includes('/analysis'))
+		return route.fulfill({
+			json: {
+				ok: true,
+				mode: body.mode,
+				// 和 /view 保持一致：前端「采用已有 iframe」时只调这个接口，来源信息得从这里回去
+				source: emptyMode ? 'merged-scope' : 'session-file',
+				session: emptyMode ? { ...SESSION_KG, exists: false, nodes: 0, edges: 0 } : SESSION_KG,
+				stats: STATS,
+				claim: CLAIM,
+				analysis: ANALYSIS,
+				ms: 21,
+			},
+		})
 	return route.fulfill({ json: { ok: false, error: 'unexpected' } })
 })
 
@@ -773,6 +800,9 @@ const pathInfo = await page.evaluate(() => {
 		inBar: Boolean(b.closest('[data-semgp-bar]')),
 		inInfo: Boolean(b.closest('[data-semgp-info]')),
 		title: b.getAttribute('title') || '',
+		text: (b.textContent || '').trim(),
+		source: b.getAttribute('data-semgp-path-source') || '',
+		infoText: (document.querySelector('[data-semgp-info]')?.textContent || '').replace(/\s+/g, ' '),
 		h: Math.round(r.height),
 		cursor: getComputedStyle(b).cursor,
 	};
@@ -788,11 +818,19 @@ check(
 	pathInfo.title,
 )
 check(
-	'路径 tooltip 说清了它来自哪个 profile（host 读的是 profile 里写死的那一个）',
-	pathInfo.title.includes('profile「web」'),
-	pathInfo.title.replace(/\n/g, ' / '),
+	'★ 「本对话」显示/复制的是这个会话**自己**的图文件路径（不是那张共用的合并图）',
+	pathInfo.source === 'session' &&
+		pathInfo.text.includes('sessions/session-stub-0001.json') &&
+		pathInfo.title.includes('本对话自己那个图文件'),
+	JSON.stringify({ source: pathInfo.source, text: pathInfo.text, title: pathInfo.title.replace(/\n/g, ' / ') }),
+)
+check(
+	'归属说明里点明了数据来自本对话自己的文件（用户问过「为什么路径都一样」，这里就是答案）',
+	pathInfo.infoText.includes('来自本对话自己的文件'),
+	pathInfo.infoText.slice(0, 90),
 )
 check('路径按钮的鼠标光标是 copy（一眼看得出能复制）', pathInfo.cursor === 'copy', String(pathInfo.cursor))
+console.log(`  · 路径现场：${JSON.stringify({ source: pathInfo.source, text: pathInfo.text, info: pathInfo.infoText.slice(0, 80) })}`)
 
 await page.evaluate(() => document.querySelector('[data-semgp-path]').click())
 await page.waitForTimeout(250)
@@ -801,8 +839,10 @@ const copied = await page.evaluate(() => ({
 	label: (document.querySelector('[data-semgp-path]')?.textContent || '').trim(),
 }))
 check(
-	'点路径真的把完整路径复制到剪贴板了',
-	typeof copied.text === 'string' && copied.text.endsWith('/kg.json') && copied.text.includes('dsh-semantica-graph'),
+	'点路径复制出来的是「本对话自己那份」的完整路径',
+	typeof copied.text === 'string' &&
+		copied.text.endsWith('sessions/session-stub-0001.json') &&
+		copied.text.includes('dsh-semantica-graph'),
 	String(copied.text),
 )
 check('复制成功后按钮上出现「已复制」', copied.label === '已复制', copied.label)
@@ -998,6 +1038,34 @@ const emptyDebug = await page.evaluate(() => ({
 }))
 console.log(`  · 空态现场：${JSON.stringify(emptyDebug)}\n  · 请求日志（共 ${requestLog.length} 条）：${JSON.stringify(requestLog)}`)
 const emptyText = await page.textContent('[data-semgp-center]')
+{
+	// 空态同时是「本会话还没自己的图文件」那条路：显示退回合并图，并说清差什么
+	const emptyPath = await page.evaluate(() => {
+		const b = document.querySelector('[data-semgp-path]');
+		return {
+			source: b?.getAttribute('data-semgp-path-source') || '',
+			title: b?.getAttribute('title') || '',
+			text: (b?.textContent || '').trim(),
+		};
+	})
+	check(
+		'没有本会话文件时，路径按钮退回显示合并图那份，并说清那是共用的图',
+		emptyPath.source === 'merged' &&
+			emptyPath.title.includes('整台机器共用的合并图') &&
+			emptyPath.text.includes('kg.json'),
+		JSON.stringify(emptyPath),
+	)
+	check(
+		'并把「本对话的文件应该在哪儿、还不存在」写进 tooltip（用户才知道差什么）',
+		emptyPath.title.includes('还不存在') && emptyPath.title.includes('sessions/session-stub-0001.json'),
+		emptyPath.title.replace(/\n/g, ' / '),
+	)
+	check(
+		'退回显示合并图时，tooltip 照旧说清路径来自哪个 profile',
+		emptyPath.title.includes('profile「web」'),
+		emptyPath.title.replace(/\n/g, ' / '),
+	)
+}
 check('空态给的是「本对话还没节点」，不是「图坏了」', emptyText.includes('本对话在图里还没有节点'), emptyText.replace(/\s+/g, ' ').slice(0, 80))
 check('空态给出可复制的提取指令', emptyText.includes('Semantica 知识图谱'), emptyText.replace(/\s+/g, ' ').slice(0, 60))
 check('空图时不渲染 Explorer（空画布不如一句解释）', emptyDebug.hasFrame === false, `frameHost=${emptyDebug.hasFrame}`)

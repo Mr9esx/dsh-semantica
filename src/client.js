@@ -58,6 +58,8 @@ window.__ModuleLoader__.load({
 			"path.fromProfile": "路径来自 profile「{n}」里写死的 SEMANTICA_KG_PATH（MCP 实际读写的就是它）",
 			"path.fromEnv": "路径来自环境变量 SEMANTICA_KG_PATH",
 			"path.fromDefault": "路径是按安装脚本的默认约定拼的（profile 里没写 SEMANTICA_KG_PATH）",
+			"path.fromSessionFile": "本对话自己那个图文件（别的会话写不进这里）",
+			"path.fromMerged": "整台机器共用的合并图（「全部」看的就是它）",
 			"action.copy": "复制提取指令",
 			"action.copied": "已复制",
 			"mode.conversation": "本对话",
@@ -93,6 +95,7 @@ window.__ModuleLoader__.load({
 					+ "想让它以后每一轮都自己写，把「每轮提取」打开。",
 			"state.taggedOnly": "本对话 {n} 个节点",
 			"state.byEdge": "其中 {n} 个是我这次写过的边连到的",
+			"state.fromSessionFile": "来自本对话自己的文件",
 			"state.claimByEntity": "按实体边认领 {n} 条决策",
 			// 曾经有「按时间认领」这句 —— 那条兜底规则会把别的会话的决策算进来，已删除
 			"state.untaggedNote": "图里还有 {n} 个节点没打会话标，只出现在「全部」里",
@@ -130,6 +133,8 @@ window.__ModuleLoader__.load({
 			"path.fromProfile": "Path comes from SEMANTICA_KG_PATH in profile \"{n}\" (what the MCP server actually reads and writes)",
 			"path.fromEnv": "Path comes from the SEMANTICA_KG_PATH environment variable",
 			"path.fromDefault": "Path follows the installer's default convention (no SEMANTICA_KG_PATH in the profile)",
+			"path.fromSessionFile": "This chat's own graph file (no other chat can write here)",
+			"path.fromMerged": "The machine-wide merged graph (what “All” shows)",
 			"action.copy": "Copy extract prompt",
 			"action.copied": "Copied",
 			"mode.conversation": "This chat",
@@ -167,6 +172,7 @@ window.__ModuleLoader__.load({
 					+ "To have it write every turn from now on, turn on “extract per turn”.",
 			"state.taggedOnly": "{n} nodes in this chat",
 			"state.byEdge": "{n} of them linked by an edge I wrote",
+			"state.fromSessionFile": "from this chat's own file",
 			"state.claimByEntity": "{n} decisions claimed by entity edges",
 			"state.claimByTime": "{n} decisions claimed by time",
 			"state.untaggedNote": "{n} nodes carry no conversation tag (visible under “All”)",
@@ -955,7 +961,16 @@ window.__ModuleLoader__.load({
 						// Explorer，也就不影响那个已经活着的 iframe）。
 						try {
 							const data = await postJson("/api-semantica/analysis", { sessionId, mode });
-							if (data.ok === true) setFallbackStats({ stats: data.stats, claim: data.claim });
+							if (data.ok === true) {
+								// source / session 必须一起带回来：不然「采用已有 iframe」这条路
+								// 会让工具栏退回显示合并图路径，看起来像没接通（踩过一次）
+								setFallbackStats({
+									stats: data.stats,
+									claim: data.claim,
+									source: data.source,
+									session: data.session ?? null,
+								});
+							}
 						} catch {
 							// 补不到就保持「—」，不打断已经显示出来的图
 						}
@@ -1053,6 +1068,18 @@ window.__ModuleLoader__.load({
 			const stats = (view && view.stats) || (analysis && analysis.stats) || (fallbackStats && fallbackStats.stats) || null;
 			const claim = (view && view.claim) || (analysis && analysis.claim) || (fallbackStats && fallbackStats.claim) || null;
 			const kgPath = (status && status.kg && status.kg.path) || "";
+			// 「本对话」优先读这个会话自己的物理文件（包装层按会话写的）。读的是它时，工具栏上
+			// 显示/复制的就该是它 —— 用户问过「为什么所有知识图谱路径都一样」，现在本对话有自己
+			// 的一条路径，界面必须说清显示的是哪一份。
+			// 数据来自哪个文件：/view 会带，/analysis 也会带（采用已有 iframe 时只有后者）
+			const viewSource =
+				(view && view.source) || (analysis && analysis.source) || (fallbackStats && fallbackStats.source) || "";
+			const sessionInfo =
+				(view && view.session) || (analysis && analysis.session) || (fallbackStats && fallbackStats.session) || null;
+			const sessionPath = (sessionInfo && sessionInfo.path) || (status && status.session && status.session.path) || "";
+			const sessionExists = Boolean(sessionInfo ? sessionInfo.exists : status && status.session && status.session.exists);
+			const fromSessionFile = mode === "conversation" && viewSource === "session-file";
+			const shownPath = fromSessionFile && sessionPath ? sessionPath : kgPath;
 			// 这个路径是哪来的 —— 用户改过 profile 时，得能说清面板读的是哪一份
 			const kgSource = (status && status.kg && status.kg.source) || "";
 			const instruction = (status && status.instruction) || "";
@@ -1120,6 +1147,7 @@ window.__ModuleLoader__.load({
 										// 被省略号收掉时，完整解释在这里（悬停可看）
 										title: [
 											mode === "conversation" ? Tn("state.taggedOnly", claim.tagged) : null,
+											fromSessionFile ? T("state.fromSessionFile") : null,
 											claim.byEdge ? Tn("state.byEdge", claim.byEdge) : null,
 											claim.byEntity ? Tn("state.claimByEntity", claim.byEntity) : null,
 											claim.untagged ? Tn("analysis.untaggedNote", claim.untagged) : null,
@@ -1129,6 +1157,7 @@ window.__ModuleLoader__.load({
 									},
 									[
 										mode === "conversation" ? Tn("state.taggedOnly", claim.tagged) : null,
+										fromSessionFile ? T("state.fromSessionFile") : null,
 										claim.byEdge ? Tn("state.byEdge", claim.byEdge) : null,
 										claim.byEntity ? Tn("state.claimByEntity", claim.byEntity) : null,
 										claim.untagged ? Tn("analysis.untaggedNote", claim.untagged) : null,
@@ -1139,30 +1168,41 @@ window.__ModuleLoader__.load({
 							: null,
 						view && view.ms ? h("span", { "data-semgp-muted": "" }, `${view.ms}ms`) : null,
 						// 图文件路径：点一下复制。完整路径在 tooltip 里。
-						kgPath
+						shownPath
 							? h(
 									"button",
 									{
 										type: "button",
 										"data-semgp-btn": "",
 										"data-semgp-path": "",
+										"data-semgp-path-source": fromSessionFile ? "session" : "merged",
 										title: [
 											T("path.hint"),
-											kgPath,
-											kgSource.startsWith("profile:")
-												? Tn("path.fromProfile", kgSource.slice("profile:".length))
-												: kgSource === "env"
-													? T("path.fromEnv")
-													: T("path.fromDefault"),
-										].join("\n"),
+											shownPath,
+											fromSessionFile ? T("path.fromSessionFile") : T("path.fromMerged"),
+											// 显示的是合并图时，说清这个路径是哪来的（profile / 环境变量 / 默认约定）
+											fromSessionFile
+												? null
+												: kgSource.startsWith("profile:")
+													? Tn("path.fromProfile", kgSource.slice("profile:".length))
+													: kgSource === "env"
+														? T("path.fromEnv")
+														: T("path.fromDefault"),
+											// 本对话还没有自己的文件时，把「它应该在哪儿」也告诉用户
+											mode === "conversation" && !fromSessionFile && sessionPath && !sessionExists
+												? `${sessionPath}（还不存在）`
+												: null,
+										]
+											.filter(Boolean)
+											.join("\n"),
 										onClick: () => {
-											void copyText(kgPath).then((ok) => {
+											void copyText(shownPath).then((ok) => {
 												setPathCopied(ok);
 												setTimeout(() => setPathCopied(false), 1400);
 											});
 										},
 									},
-									pathCopied ? T("action.copied") : shortPath(kgPath),
+									pathCopied ? T("action.copied") : shortPath(shownPath),
 								)
 							: null,
 					),

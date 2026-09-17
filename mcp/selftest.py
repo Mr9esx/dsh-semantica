@@ -30,6 +30,18 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 SERVER = HERE / "server.py"
 
+# 自检必须用**装了 semantica 的那个解释器**跑。系统 python / conda 里没有它，直接跑会在
+# 子进程里炸出一串 ImportError，看起来像包装层坏了 —— 所以先说人话。
+try:
+    import semantica  # noqa: F401
+except ImportError:  # pragma: no cover
+    print(
+        "这个脚本要在装了 semantica 的解释器下跑（venv），比如：\n"
+        '  "$HOME/Library/Application Support/dsh-desktop/harness/semantica-venv/bin/python" mcp/selftest.py',
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
 CONV_A = "session-d1648c08-61b2-4b1b-80ff-8ac31ac8944d"
 CONV_B = "session-d7c9295a-9a19-42cc-a11d-468209728143"
 
@@ -132,6 +144,39 @@ def main() -> int:
         merged.write_text("", "utf8")
         file_a = sessions / f"{CONV_A}.json"
         file_b = sessions / f"{CONV_B}.json"
+
+        # ── 路径契约：包装层和插件必须算出同一个文件名，否则插件会静默退回按标筛 ──
+        sys.path.insert(0, str(HERE))
+        import server as wrapper  # noqa: PLC0415
+
+        import os as _os
+
+        saved_dir = _os.environ.pop("DSH_SEMANTICA_SESSIONS_DIR", None)
+        saved_kg = _os.environ.get("SEMANTICA_KG_PATH")
+        try:
+            _os.environ["SEMANTICA_KG_PATH"] = str(merged)
+            check(
+                "没设 DSH_SEMANTICA_SESSIONS_DIR 时，会话目录默认落在合并图同级的 sessions/（插件算的是同一条）",
+                str(wrapper.session_file(CONV_A)) == str(sessions / f"{CONV_A}.json"),
+                str(wrapper.session_file(CONV_A)),
+            )
+            check(
+                "会话 id 里的路径成分被净化（与 src/kg.js 的 sessionGraphPath 同一张表）",
+                wrapper.session_file("../../evil/id").name == "evil_id.json"
+                and wrapper.session_file("session-abc-123").name == "session-abc-123.json"
+                and wrapper.session_file("").name == "unknown.json",
+                " / ".join(
+                    wrapper.session_file(x).name for x in ("../../evil/id", "session-abc-123", "")
+                ),
+            )
+        finally:
+            _os.environ.pop("DSH_SEMANTICA_SESSIONS_DIR", None)
+            if saved_dir is not None:
+                _os.environ["DSH_SEMANTICA_SESSIONS_DIR"] = saved_dir
+            if saved_kg is None:
+                _os.environ.pop("SEMANTICA_KG_PATH", None)
+            else:
+                _os.environ["SEMANTICA_KG_PATH"] = saved_kg
 
         srv = Server(merged, sessions)
         try:

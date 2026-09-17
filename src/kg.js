@@ -21,7 +21,7 @@
 // 展示交给上游 Explorer，分析归插件自己 —— 分工干净。
 
 import { readFileSync, writeFileSync, mkdirSync, rmSync, statSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { dirname, join } from 'node:path'
 
 /** 归档节点不进视图（MCP 的 delete_node 是软删，标记 status=archived）。 */
 const ARCHIVED = 'archived'
@@ -294,6 +294,56 @@ export function scopeGraph(graph, opts) {
 			// 没打任何会话标的语义节点 —— 它们只可能出现在「全部」里
 			untagged: live.filter((n) => !DECISION_TYPES.has(String(n.type)) && !hasAnyTag(n)).length,
 			totalSemantic,
+		},
+	}
+}
+
+/**
+ * 某个会话**自己那份**图文件的路径（按会话分文件时用的，见 mcp/server.py）。
+ *
+ * 净化规则必须与包装层 `mcp/server.py` 的 `session_file()` **一致**，否则插件会去找一个不存在
+ * 的文件、静默退回按标筛，用户看到的就是「明明接通了却没生效」。会话 id 来自模型可写的
+ * metadata，所以净化不只是为了文件名好看。
+ */
+export function sessionGraphPath(kgPath, sessionId) {
+	const safe = String(sessionId ?? '')
+		.replace(/[^A-Za-z0-9_-]/g, '_')
+		.replace(/^_+|_+$/g, '')
+		.slice(0, 120)
+	if (!safe) return null
+	return join(dirname(String(kgPath ?? '')), 'sessions', `${safe}.json`)
+}
+
+/**
+ * 把「本会话自己的物理文件」直接当成视图。
+ *
+ * 与 `scopeGraph` 的按标筛不同：这个文件里**只有本会话写的东西**（包装层按会话路由写入），
+ * 所以不需要任何认领逻辑，也不可能出现「节点被别的会话覆盖标、于是本会话视图里少一个」。
+ * 唯一还要做的仍是清边：模型可能在 add_relationship 里指向一个本会话从没写过的节点（那条边
+ * 在合并图里有意义，在单会话文件里就是悬空边）—— 同一类 bug 犯过一次就够了。
+ */
+export function scopeOwnGraph(graph) {
+	const live = (graph?.nodes ?? []).filter((n) => n?.properties?.status !== ARCHIVED)
+	const byId = new Map(live.map((n) => [String(n.id), n]))
+	const rawEdges = (graph?.edges ?? []).length
+	const edges = cleanEdges(graph?.edges, byId)
+	const semantic = live.filter((n) => !DECISION_TYPES.has(String(n.type)))
+	return {
+		mode: 'conversation',
+		// 数据是哪来的：本会话自己的文件 / 在合并图上按标筛
+		source: 'session-file',
+		nodes: live,
+		edges,
+		claim: {
+			// 这个文件里的东西全是本会话写的，所以「打了标」的数量就是全部语义节点
+			tagged: semantic.length,
+			byEdge: 0,
+			byEntity: 0,
+			untagged: 0,
+			untaggedDecisions: 0,
+			totalSemantic: semantic.length,
+			// 被清掉的边（端点不在本会话文件里 / 自环 / 重复）—— 只进诊断，不打扰用户
+			droppedEdges: Math.max(0, rawEdges - edges.length),
 		},
 	}
 }
