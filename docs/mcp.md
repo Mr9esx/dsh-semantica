@@ -1,4 +1,48 @@
-# semantica MCP：让 agent 主动声明知识图谱
+# 声明通道：让 agent 主动把知识写进图里
+
+## 先看这里：插件自带的三个工具才是正路
+
+插件注册了三个工具，**不需要任何额外配置**，模型直接就能用：
+
+| 工具 | 用途 |
+| --- | --- |
+| `semantica_record_decision` | AI 声明**自己的**决策：选了什么、为什么、当时什么场景 |
+| `semantica_add_entity` | 声明一个真实存在的实体（产品/库/概念/组织…） |
+| `semantica_add_relationship` | 声明两个东西之间的关系 |
+
+它们写进的是**当前会话**那张图，和侧边栏看到的完全是同一个文件
+（`<harness>/dsh-semantica-graph/session-<会话id>.json`）。
+
+**为什么不用上游那个 MCP server 来做这件事**：它是单例进程、内存里只有一张图、
+落在固定的 `SEMANTICA_KG_PATH` —— 所有对话的声明会混在一起，而插件展示的单位是
+当前会话。两条对齐的路都试过、都走不通：
+
+- `dsh-mcp-client` spawn 子进程时环境会先过一道清洗，**所有 `DSH_*` 变量被删掉**，
+  所以会话 id 传不进去；
+- 配置里的 `env` 是静态字符串，**没有按会话插值的能力**。
+
+插件自己的工具就没有这个问题：工具执行上下文里有 `exec.agent.session.header.id`，
+天生知道该写哪个文件。拿不到会话 id 时**直接报错、一个文件都不写** ——
+绝不猜一个默认值把 A 对话的知识写进 B 对话的图里。
+
+**AI 的决策和用户的选择在图上分得开**：工具写的是 `decision_maker: "ai"`，
+从提问工具读到的是 `decision_maker: "user"`。
+
+**重新抽取不会丢掉声明**：重建只读对话日志，声明不在输入里，所以重建时会把
+「标记过的」节点与边搬回来（`graph_worker.py` 的 `_carry_declared`）。搬回来的数量
+在 stats 的 `carried` 里报出来。不这么做的话，用户每点一次「重新抽取」，
+AI 声明过的东西就静默消失一次 —— 那种丢失事后补不回来。
+
+---
+
+# 可选：把上游的 semantica MCP 也接进来
+
+上面那三个工具是插件自己实现的（会话级）。上游的 `semantica-mcp` 提供的是
+**15 个工具 + 一张全局图**，适合「跨会话的长期知识库」这种用法 ——
+`find_precedents`、`get_causal_chain`、`get_graph_analytics`、`run_reasoning`
+这些插件没实现的都在它那边。两条路可以同时存在，互不干扰。
+
+下面是接入它的配置。
 
 上游 [semantica](https://github.com/semantica-agi/semantica) 推荐的用法是 **MCP 优先**
 （它的 `integrations/openclaw/README.md` 把 MCP 标为 "(recommended)"，REST 是替代方案）。

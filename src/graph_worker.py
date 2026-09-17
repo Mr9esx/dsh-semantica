@@ -1021,6 +1021,37 @@ def build_context_graph(payload):
 
     timing["semantics"] = time.time() - _t_nodes - timing["skeleton"]
 
+    # 把上一次声明出来的东西搬回来（只搬标记过的，见 _carry_declared 的说明）。
+    # 放在 sanitize 之前：声明的节点 id 也走同一套保留字符处理。
+    carried_nodes, carried_edges = _carry_declared(out_path)
+    carried_n = 0
+    for n in carried_nodes:
+        nid = n.get("id")
+        if not nid or nid in nodes:
+            # 重建已经产出了同名节点（比如同一个实体），以重建的为准，
+            # 但把声明标记带上，免得下次重建认不出来。
+            if nid in nodes and (n.get("properties") or {}).get("declared"):
+                nodes[nid].setdefault("properties", {})["declared"] = True
+            continue
+        nodes[nid] = {"id": nid, "type": n.get("type") or "entity",
+                      "properties": dict(n.get("properties") or {})}
+        carried_n += 1
+    carried_e = 0
+    seen_edges = {(e.get("source_id"), e.get("target_id"), e.get("type")) for e in edges}
+    for e in carried_edges:
+        src = e.get("source_id") or e.get("source")
+        dst = e.get("target_id") or e.get("target")
+        if not src or not dst or src not in nodes or dst not in nodes:
+            continue
+        if (src, dst, e.get("type")) in seen_edges:
+            continue
+        edges.append({
+            "id": e.get("id"), "type": e.get("type"), "source_id": src, "target_id": dst,
+            "weight": e.get("weight", 1.0), "properties": dict(e.get("properties") or {}),
+        })
+        seen_edges.add((src, dst, e.get("type")))
+        carried_e += 1
+
     # 交给 Explorer 之前把保留字符清掉 —— 不清的话它的图谱视图会直接崩，
     # 原因见 _RESERVED_ID_CHARS 上面的注释。
     nodes, edges, renamed_ids = _sanitize_ids(nodes, edges)
@@ -1301,6 +1332,8 @@ def build_context_graph(payload):
         "messages": len(messages),
         "tools": len(tool_calls),
         "decisions": decisions_n,
+        # 上一次声明出来的东西搬回来多少（重建不该让它们消失）
+        "carried": {"nodes": carried_n, "edges": carried_e},
         # 决策层用原生 record_decision 建的，所以这些失败是「接口没按预期工作」
         # 的信号，而不是可以忽略的噪声 —— 全部上报。
         "decisionsFailed": decisions_failed,
@@ -1337,11 +1370,200 @@ def build_context_graph(payload):
 
 # ── 协议主循环 ──────────────────────────────────────────────────────────────
 
+# ── 声明通道：把 agent 主动声明的知识写进**当前会话**那张图 ─────────────────
+#
+# 为什么要有这条：从对话记录里能重建的只有「用户确认过的选择」和文本里抽出来的
+# 实体。**AI 自己做的决策**在它的思考过程里，事后反推不可靠 —— 只有让它在做事的
+# 当下主动说「我选了 X，因为 Y」，那才是真决策。
+#
+# 为什么写进会话图而不是上游 MCP server 那张全局图：上游的 semantica-mcp 是单例
+# 进程、内存里只有一张图、落在一个固定的 SEMANTICA_KG_PATH —— 所有对话的声明会
+# 混在一起，而插件展示的单位是当前会话。所以这里由插件自己起、自己写，
+# 会话 id 从工具调用上下文里拿（exec.agent.session.header.id），不需要 agent 打标。
+# 声明出来的东西必须在**重新抽取**时活下来。
+#
+# 为什么需要这个：口子开在别处 —— 重新抽取会从头重建整张图并按同一条路径落盘，
+# 而 AI 声明出来的决策/实体/关系不在重建的输入里（重建只读对话日志）。
+# 不搬过来的话，用户每点一次「重新抽取」，AI 之前声明的东西就**静默消失**一次。
+# 这种丢数据不能靠「反正还能再声明一遍」糊过去 —— 声明是 agent 做事当下的产物，
+# 事后补不回来。
+#
+# 只搬**明确标记过的**：我们自己声明时打的 `declared: true`，以及 AI 的决策节点
+# （`decision_maker == "ai"`）。抽取层产出的东西不搬 —— 它们本来就该被重建覆盖。
+_CARRY_EDGE_TYPES = frozenset({
+    "belongs_to", "made_by", "involves", "INFLUENCED", "CAUSED", "PRECEDENT_FOR",
+})
+
+
+def _carry_declared(out_path):
+    """从已存在的图里取出「声明出来的」节点与边，用于合并进重建结果。"""
+    if not out_path or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        return [], []
+    try:
+        with open(out_path, encoding="utf-8") as f:
+            old = json.load(f)
+    except Exception:
+        # 旧文件读不出来就当没有：重建的产物仍然完整，声明部分丢失会被下面
+        # 的返回值体现（没有可搬的东西），不静默改写成别的语义。
+        return [], []
+    old_nodes = old.get("nodes") or []
+    old_edges = old.get("edges") or []
+    keep = set()
+    for n in old_nodes:
+        props = n.get("properties") or {}
+        if props.get("declared") or (n.get("type") == "decision"
+                                     and props.get("decision_maker") == "ai"):
+            keep.add(n.get("id"))
+    if not keep:
+        return [], []
+    edges = []
+    for e in old_edges:
+        src = e.get("source_id") or e.get("source")
+        dst = e.get("target_id") or e.get("target")
+        props = e.get("properties") or {}
+        if props.get("declared") or (src in keep and e.get("type") in _CARRY_EDGE_TYPES):
+            edges.append(e)
+            keep.add(src)
+            keep.add(dst)
+    nodes = [n for n in old_nodes if n.get("id") in keep]
+    return nodes, edges
+
+
+def declare(payload):
+    """
+    处理一次声明。payload:
+      graphPath  会话图文件（不存在则新建）
+      kind       decision | entity | relation
+      其余字段按 kind 取
+    """
+    # 和 build_context_graph 一样在函数内导入 —— 这样不装 semantica 也能 import
+    # 本模块（scripts/check-entity-rules.mjs 就靠这一点在纯 python3 下跑规则检查）。
+    from semantica.context.context_graph import ContextGraph
+    from semantica.kg.graph_analyzer import CentralityCalculator
+    from semantica.kg.community_detector import CommunityDetector
+
+    out_path = payload.get("graphPath")
+    if not out_path:
+        raise ValueError("declare 缺少 graphPath")
+    kind = str(payload.get("kind") or "").strip()
+    if kind not in ("decision", "entity", "relation"):
+        raise ValueError(f"未知的声明类型: {kind!r}")
+
+    t0 = time.time()
+    graph = ContextGraph(advanced_analytics=True)
+    if os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+        # 已有图要先读进来再改 —— 否则一次声明会把整张会话图覆盖掉。
+        graph.load_from_file(out_path)
+
+    result = {"kind": kind}
+
+    if kind == "decision":
+        outcome = str(payload.get("outcome") or "").strip()
+        reasoning = str(payload.get("reasoning") or "").strip()
+        scenario = str(payload.get("scenario") or "").strip()
+        category = str(payload.get("category") or "").strip()
+        if not outcome:
+            raise ValueError("decision 必须给 outcome（你选了什么）")
+        # 和 record_decision 的要求一致：三个字段都非空，否则它会抛 ValueError。
+        # 占位符写明「声明时没给」，而不是我们编一个。
+        scenario = scenario or "（声明时未给场景）"
+        reasoning = reasoning or "（声明时未给理由）"
+        category = category or "AI 决策"
+        did = graph.record_decision(
+            category=category,
+            scenario=scenario,
+            reasoning=reasoning,
+            outcome=outcome,
+            confidence=1.0,
+            # 这一层是 AI 自己的决策，和「用户确认过的选择」（decision_maker=user）
+            # 必须分得开 —— 混在一起就分不清谁做的决定了。
+            decision_maker="ai",
+            metadata={"source": "agent-declared", "declaredAt": _iso_local(int(time.time() * 1000))},
+        )
+        result["id"] = did
+
+    elif kind == "entity":
+        label = str(payload.get("label") or "").strip()
+        if not label:
+            raise ValueError("entity 必须给 label")
+        etype = str(payload.get("etype") or "UNKNOWN").strip().upper() or "UNKNOWN"
+        # 和抽取层用同一套归一化，这样声明的实体能和抽出来的实体合并成同一个节点，
+        # 而不是并排出现两个。
+        nid = f"ent:{_norm_key(label)}"
+        if nid in graph.nodes:
+            graph.add_node_attribute(nid, {"etype": etype, "declared": True})
+        else:
+            graph.add_nodes([{
+                "id": nid, "type": "entity",
+                "properties": {
+                    "label": label, "etype": etype, "kind": "entity",
+                    "mentions": 1, "declared": True,
+                },
+            }])
+        result["id"] = nid
+
+    else:
+        src = str(payload.get("from") or "").strip()
+        dst = str(payload.get("to") or "").strip()
+        if not src or not dst:
+            raise ValueError("relation 必须给 from 和 to（实体名或节点 id）")
+        # 实体名先按抽取层的规则转成节点 id；已经是节点 id 的原样用。
+        def _resolve(name):
+            if name in graph.nodes:
+                return name
+            return f"ent:{_norm_key(name)}"
+        a, b = _resolve(src), _resolve(dst)
+        for nid, label in ((a, src), (b, dst)):
+            if nid not in graph.nodes:
+                graph.add_nodes([{
+                    "id": nid, "type": "entity",
+                    "properties": {"label": label, "etype": "UNKNOWN", "kind": "entity",
+                                   "mentions": 1, "declared": True},
+                }])
+        edge_type = str(payload.get("type") or "related_to").strip() or "related_to"
+        graph.add_edge(a, b, edge_type=edge_type, declared=True)
+        result["from"] = a
+        result["to"] = b
+
+    # 分析只补**便宜的那部分**：度中心性 0.1s、社区 0.9s。特征向量/接近中心性
+    # 要 3.3s，而且声明是模型可能连续调用的工具 —— 每次两三秒的等待不值得。
+    # 它们会在下一次完整重建时刷新。这里先保证新节点不是「没有属性」的孤儿。
+    analysis_error = None
+    try:
+        degree = CentralityCalculator().calculate_degree_centrality(graph) or {}
+        values = degree.get("centrality", degree)
+        assign = (CommunityDetector().detect_communities(graph) or {}).get("node_assignments") or {}
+        for nid in graph.nodes:
+            attrs = {}
+            if nid in values:
+                attrs["degreeCentrality"] = round(float(values[nid]), 6)
+            if nid in assign:
+                attrs["community"] = int(assign[nid])
+            if attrs:
+                graph.add_node_attribute(nid, attrs)
+    except Exception as exc:
+        analysis_error = f"{type(exc).__name__}: {exc}"
+
+    graph.save_to_file(out_path)
+    result["ok"] = True
+    result["nodes"] = len(graph.nodes)
+    result["edges"] = len(graph.edges)
+    result["analysisError"] = analysis_error
+    result["elapsed"] = round(time.time() - t0, 3)
+    return result
+
+
 def handle(req):
     cmd = req.get("cmd")
     payload = req.get("payload") or {}
     if cmd == "ping":
         return {"ok": True, "pong": True, "semantica": SEMANTICA_VERSION, "importError": _import_error}
+    if cmd == "declare":
+        try:
+            return {"ok": True, "result": declare(payload)}
+        except Exception as exc:
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}",
+                    "trace": traceback.format_exc()[-1500:]}
     if cmd == "build_context_graph":
         if _import_error is not None:
             return {"ok": False, "error": f"无法导入 semantica: {_import_error}"}

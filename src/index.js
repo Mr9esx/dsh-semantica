@@ -115,6 +115,148 @@ function apply(ctx) {
   warmTimer.unref?.()
   ctx.effect(() => () => clearTimeout(warmTimer), 'semantica-graph: warmup')
 
+  // ── 声明通道：让 agent 把它自己的决策/知识写进**当前会话**这张图 ────────────
+  //
+  // 为什么是插件自己的工具，而不是上游那个 semantica-mcp：
+  // 上游的 MCP server 是**单例进程、一张全局图**（落在一个固定的 SEMANTICA_KG_PATH），
+  // 所有对话的声明会混在一起；而插件展示的单位是「当前会话」。两条路都试过对齐，
+  // 都走不通 —— dsh-mcp-client spawn 子进程时会清洗掉所有 DSH_* 环境变量，
+  // 配置里的 env 又是静态字符串、没有按会话插值的能力。
+  //
+  // 所以插件自己起、自己写：这里的每个工具调用都能从执行上下文拿到
+  // `exec.agent.session.header.id`，于是天生知道该写哪个会话的图文件 ——
+  // 不需要 agent 打标，也不可能串台。
+  //
+  // 这三个工具产出的是 **AI 自己的决策**（decision_maker="ai"），和从提问工具
+  // 读到的「用户确认过的选择」（decision_maker="user"）在图上分得开。
+  ctx.inject(['tools'], (toolCtx) => {
+    const textOutput = (describe) => ({
+      schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          id: { type: 'string' },
+          message: { type: 'string' },
+          nodes: { type: 'number' },
+          edges: { type: 'number' },
+        },
+        required: ['ok', 'message'],
+        additionalProperties: false,
+      },
+      render: (_args, value) => [{ type: 'text', text: String(value?.message ?? describe) }],
+    })
+
+    // 会话 id 只从执行上下文取，取不到就**明确报错** —— 绝不猜一个默认值写下去，
+    // 那会把一个会话的知识写进另一个会话的图里，而且用户看不出来。
+    const sessionOf = (exec) => {
+      const id = exec?.agent?.session?.header?.id
+      if (!id) {
+        throw new Error(
+          '拿不到当前会话 id（exec.agent.session.header.id 为空），无法确定该写哪张会话图。' +
+          '本次声明未写入任何文件。',
+        )
+      }
+      return id
+    }
+
+    const declare = async (exec, payload) => {
+      const sessionId = sessionOf(exec)
+      const graphPath = graphPathFor(sessionId)
+      const res = await worker.request('declare', { graphPath, ...payload })
+      if (!res?.ok) throw new Error(res?.error || '声明失败')
+      const r = res.result
+      // 声明改了图文件的内容，但**会话签名没变** —— 不把缓存条目清掉的话，
+      // 面板会继续用内存里那份旧图，用户看不到刚声明的东西。
+      // 清掉之后下次打开会重新抽取一次（抽取会保留声明，见 graph_worker.py
+      // 的 _carry_declared），所以不会丢东西。
+      graphCache.delete(sessionId)
+      return {
+        ok: true,
+        id: r.id || `${r.from || ''}→${r.to || ''}`,
+        nodes: r.nodes,
+        edges: r.edges,
+        message: `${payload.kind} 已写入当前会话的图（${r.nodes} 节点 / ${r.edges} 边）。图谱面板下次打开时会刷新。`,
+      }
+    }
+
+    const TOOLS = [
+      {
+        name: 'semantica_record_decision',
+        description:
+          'Record a decision YOU (the assistant) made, into the knowledge graph of the CURRENT ' +
+          'conversation. Use it when you actually choose between real alternatives — a design, an ' +
+          'approach, a tradeoff — so the choice becomes auditable instead of buried in your reasoning. ' +
+          'Give outcome (what you chose), reasoning (why), and scenario (what situation forced the ' +
+          'choice). Do NOT use it for choices the user made through a question tool; those are already ' +
+          'recorded automatically. The result lands only in this conversation\'s graph.',
+        parameters: {
+          type: 'object',
+          properties: {
+            outcome: { type: 'string', description: 'What you decided, concretely.' },
+            reasoning: { type: 'string', description: 'Why — the tradeoff or evidence behind it.' },
+            scenario: { type: 'string', description: 'The situation that required the decision.' },
+            category: { type: 'string', description: 'Short category, e.g. "架构选型". Optional.' },
+          },
+          required: ['outcome', 'reasoning', 'scenario'],
+          additionalProperties: false,
+        },
+        output: textOutput('decision recorded'),
+        execute: (args, exec) => declare(exec, { kind: 'decision', ...args }),
+      },
+      {
+        name: 'semantica_add_entity',
+        description:
+          'Declare a real entity (a product, library, concept, organisation, file…) into the knowledge ' +
+          'graph of the CURRENT conversation. Use it for things the conversation is genuinely about, ' +
+          'so the graph shows what matters instead of whatever a text extractor guessed. Give the name ' +
+          'as written, e.g. "ContextGraph" or "Semantica".',
+        parameters: {
+          type: 'object',
+          properties: {
+            label: { type: 'string', description: 'The entity name as it appears in the conversation.' },
+            etype: {
+              type: 'string',
+              description: 'One of: PERSON, ORG, PRODUCT, CODE, CONCEPT, UNKNOWN. Defaults to UNKNOWN.',
+            },
+          },
+          required: ['label'],
+          additionalProperties: false,
+        },
+        output: textOutput('entity declared'),
+        execute: (args, exec) => declare(exec, { kind: 'entity', ...args }),
+      },
+      {
+        name: 'semantica_add_relationship',
+        description:
+          'Declare a relationship between two things into the knowledge graph of the CURRENT ' +
+          'conversation. Both ends are matched by name (an existing entity is reused rather than ' +
+          'duplicated). Use it when the conversation establishes a real connection, e.g. ' +
+          'from="Semantica" to="ContextGraph" type="uses".',
+        parameters: {
+          type: 'object',
+          properties: {
+            from: { type: 'string', description: 'Source entity name.' },
+            to: { type: 'string', description: 'Target entity name.' },
+            type: { type: 'string', description: 'Relation type, e.g. uses / depends_on / extends.' },
+          },
+          required: ['from', 'to'],
+          additionalProperties: false,
+        },
+        output: textOutput('relationship declared'),
+        execute: (args, exec) => declare(exec, { kind: 'relation', ...args }),
+      },
+    ]
+
+    for (const def of TOOLS) {
+      try {
+        toolCtx.tools.register(def)
+      } catch (error) {
+        ctx.logger?.error?.(`semantica-graph: 工具 ${def.name} 注册失败：${String(error)}`)
+      }
+    }
+    ctx.logger?.debug?.(`semantica-graph: 已注册 ${TOOLS.length} 个声明工具`)
+  })
+
   ctx.inject(['webServer'], (webCtx) => {
     const ws = webCtx.webServer
 
