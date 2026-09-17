@@ -1346,6 +1346,37 @@ window.__ModuleLoader__.load({
 			const { on, busy, flip } = useAutoToggle(sessionId);
 			const compact = props.compact === true;
 
+			// 输入框那一排这个按钮到底有没有被真界面渲染出来、多大、在哪 —— 我自己看不见
+			// 那个窗口，所以让它挂载时自报一次（走已有的诊断通道落盘）。用户报过一次
+			// 「按钮在标题那排我够不着」，这条通道就是用来确认新位置真的在的。
+			const btnRef = useRef(null);
+			useEffect(() => {
+				if (!compact) return undefined;
+				const timer = setTimeout(() => {
+					const el = btnRef.current;
+					if (!el) return;
+					const r = el.getBoundingClientRect();
+					// 注意：collectDiag 只**构造**报告，发请求得调用方自己来（这是上一版的坑：
+					// 我只调了它、没发，于是这条自报永远到不了磁盘）。
+					const diag = collectDiag("composer-toggle", {
+						rect: [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)],
+						visible: r.width > 0 && r.height > 0,
+						inComposerSeat: Boolean(el.closest("[data-composer-seat]")),
+						seatDisplay: el.closest("[data-composer-seat]")
+							? getComputedStyle(el.closest("[data-composer-seat]")).display
+							: null,
+						text: (el.textContent || "").trim(),
+					});
+					void postJson("/api-semantica/diag", {
+						sessionId,
+						mode: "composer-toggle",
+						reason: "composer-toggle",
+						diag,
+					}).catch(() => {});
+				}, 700);
+				return () => clearTimeout(timer);
+			}, [compact]);
+
 			const label = compact
 				? on === true
 					? T("auto.compactOn")
@@ -1357,6 +1388,7 @@ window.__ModuleLoader__.load({
 				"button",
 				{
 					type: "button",
+					ref: btnRef,
 					"data-semgp-btn": "",
 					"data-semgp-auto": on === true ? "on" : "off",
 					"data-semgp-compact": compact ? "" : undefined,

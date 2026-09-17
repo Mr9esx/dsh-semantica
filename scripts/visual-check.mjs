@@ -657,6 +657,16 @@ check(
 		JSON.stringify(composerBtn),
 	)
 }
+{
+	// 它挂载后会自己报一次几何（我看不见真窗口，只能靠这条通道确认位置）
+	const report = diagBodies.find((b) => b?.diag?.reason === 'composer-toggle')
+	const extra = report?.diag?.extra
+	check(
+		'输入框那个开关自报了真几何（在 composer seat 里、可见）',
+		Boolean(extra) && extra.visible === true && extra.inComposerSeat === true && extra.rect[3] >= 20,
+		JSON.stringify(extra ?? null),
+	)
+}
 
 // 从**输入框那一排**点（用户报的就是「按钮在标题那排我够不着」）
 const autoClicked = await page.evaluate(() => window.__clickText('图谱提取 关'))
