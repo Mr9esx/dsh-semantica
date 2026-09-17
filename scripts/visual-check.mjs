@@ -50,13 +50,19 @@ const WIDTHS = [300, 320, 420, 520, 600, 640, 720]
 /** 两组按钮能排在同一行所需的最小宽度（实测：600 同行、520 换行）。 */
 const SAME_ROW_MIN = 600
 /**
- * 路径 chip 能和统计数字同处第一行的最小宽度（实测：640 同行、600 换行）。
+ * 路径 chip 能和统计数字同处第一行的最小宽度。
  *
- * 这个数比 SAME_ROW_MIN 更值钱：chip 一旦换行，info 从 17px 涨到 43px，
- * 工具栏跟着从 68px 涨到 94px —— 26px 的图区高度。（600px 正好落在换行那一侧，
- * 而插件默认就把面板加宽到 600，所以这个边界直接决定用户看到的是 68 还是 94。）
+ * 这个数比 SAME_ROW_MIN 更值钱：chip 一旦换行，info 从 26px 涨到 52px，
+ * 工具栏跟着从 77px 涨到 103px —— 26px 的图区高度。
+ *
+ * ⚠️ 它会跟着第一行的内容走，改第一行就得重量：
+ *   700px  无「图已过期」标记（下面主循环量的就是这个）
+ *   840px  有标记时（标记 14px 占 72px，把门槛推高 140px）
+ * 「重新抽取」按钮搬进第一行时，这个数从 640 涨到了 700。
  */
-const CHIP_ONE_LINE_MIN = 640
+const CHIP_ONE_LINE_MIN = 700
+/** 第一行多一个「图已过期」标记时的门槛 —— 标记一出现就要到这个宽度 chip 才回得来。 */
+const CHIP_ONE_LINE_MIN_STALE = 840
 
 // PathChip 的 title 是「提示语 + 换行 + 完整路径」
 const TIP = '点击复制完整路径（这张图落盘的 JSON 文件）\n'
@@ -121,9 +127,9 @@ const SEED_WIDTH_NARROW = 483
 const SEED_WIDTH_WIDE = 700
 const EXPANDED_WIDTH = 640
 
-const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
+const renderPanel = async ({ width, explorer, stats, seedWidth, stale = false }) =>
 	page.evaluate(
-		async ({ width, explorer, stats, seedWidth }) => {
+		async ({ width, explorer, stats, seedWidth, stale }) => {
 			const host = document.getElementById('host')
 			host.innerHTML = ''
 			const panel = document.createElement('div')
@@ -159,7 +165,7 @@ const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
 			}
 			window.fetch = async () => ({
 				status: 200, ok: true,
-				text: async () => JSON.stringify({ ok: true, url: explorer, cached: false, stale: false, drillable: true, stats }),
+				text: async () => JSON.stringify({ ok: true, url: explorer, cached: false, stale, drillable: true, stats }),
 			})
 			mod.apply(ctx)
 			ReactDOM.createRoot(panel).render(
@@ -209,6 +215,7 @@ const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
 				toolbarH: toolbar ? Math.round(toolbar.getBoundingClientRect().height) : 0,
 				chipW: chip ? Math.round(chip.getBoundingClientRect().width) : 0,
 				chipT: chip ? Math.round(chip.getBoundingClientRect().top) : 0,
+				chipH: chip ? Math.round(chip.getBoundingClientRect().height) : 0,
 				chipOverflowX: chip ? chip.scrollWidth - chip.clientWidth : 0,
 				overflowX: toolbar ? toolbar.scrollWidth - toolbar.clientWidth : 0,
 				frame: rel(frame),
@@ -216,6 +223,9 @@ const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
 				info: rel(info),
 				acts: rel(acts),
 				util: rel(util),
+				mini: rel(info && info.querySelector('.semg-mini')),
+				tag: rel(panel.querySelector('.semg-tag')),
+				refresh: rel([...panel.querySelectorAll('.semg-toolbar-info .semg-btn')][0]),
 				stats: [...panel.querySelectorAll('.semg-mini')].map((s) => s.textContent.trim()),
 				buttons: [...panel.querySelectorAll('.semg-toolbar-actions .semg-btn')].map((b) => b.textContent.trim()),
 				overlap,
@@ -236,7 +246,7 @@ const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
 
 			return { ...geom, chipText, chipTitle, chipCopied, chipLabelAfter }
 		},
-		{ width, explorer: EXPLORER, stats: STATS, seedWidth },
+		{ width, explorer: EXPLORER, stats: STATS, seedWidth, stale },
 	)
 
 for (const width of WIDTHS) {
@@ -266,20 +276,17 @@ for (const width of WIDTHS) {
 		)
 	}
 	// 路径 chip 的行位：够宽时和统计数字同一行，不够时换到第二行。
-	// 直接断言「chip 顶 == info 顶」比断言高度稳 —— 高度还受字体影响。
+	//
+	// 判据是**垂直中心**相等，不是顶边相等。踩过这个坑：720px 下 chip 明明在第一行，
+	// 但「重新抽取」按钮 26px 比 chip 16px 高，chip 被 align-items:center 居中，
+	// 顶边就比 info 低了 5px —— 按顶边断言会误判成「换行了」。
+	// 同一 flex 行上的元素中心必然对齐，换行必然不对齐，这个判据对两边都成立。
+	const sameLineWithStats =
+		!!r.mini && Math.abs(r.chipT + r.chipH / 2 - (r.mini.t + r.mini.h / 2)) <= 2
 	if (width >= CHIP_ONE_LINE_MIN) {
-		check(
-			'够宽时路径 chip 和统计同处第一行',
-			r.chipT - r.info.t <= 2,
-			`chip.t=${r.chipT} info.t=${r.info.t}`,
-		)
-		check('chip 不换行时 info 只有一行高', r.info.h < 25, `info.h=${r.info.h}`)
+		check('够宽时路径 chip 和统计同处第一行', sameLineWithStats, `chip.c=${r.chipT + r.chipH / 2} mini.c=${r.mini && r.mini.t + r.mini.h / 2}`)
 	} else {
-		check(
-			'不够宽时路径 chip 换到第二行',
-			r.chipT - r.info.t > 2,
-			`chip.t=${r.chipT} info.t=${r.info.t}`,
-		)
+		check('不够宽时路径 chip 换到第二行', !sameLineWithStats, `chip.c=${r.chipT + r.chipH / 2} mini.c=${r.mini && r.mini.t + r.mini.h / 2}`)
 	}
 	check(
 		'控制按钮贴着右边缘（margin-left:auto）',
@@ -305,7 +312,34 @@ for (const width of WIDTHS) {
 	console.log('')
 }
 
-// ── 侧边栏宽度：图谱面板展开时自动加宽到 600px ──
+// ── 「图已过期」标记对第一行的影响 ──
+//
+// 标记本身只有 72px，但它出现时第一行要装「图标 + 4 个统计 + 标记 + 重新抽取 + 路径 chip」，
+// chip 的同行门槛从 700px 被推到 840px。这个数会随着第一行的内容变，所以必须量、不能算。
+console.log('── 「图已过期」标记推高路径 chip 的门槛')
+for (const width of [640, CHIP_ONE_LINE_MIN_STALE]) {
+	const r = await renderPanel({ width, stats: STATS, seedWidth: SEED_WIDTH_NARROW, stale: true })
+	const mini = r.mini
+	const sameLine = !!mini && Math.abs(r.chipT + r.chipH / 2 - (mini.t + mini.h / 2)) <= 2
+	check('过期标记渲染出来了', !!r.tag, `tag=${JSON.stringify(r.tag)}`)
+	if (width < CHIP_ONE_LINE_MIN_STALE) {
+		check(
+			`${width}px 有标记时 chip 换行`,
+			!sameLine,
+			`chip.c=${r.chipT + r.chipH / 2} mini.c=${mini && mini.t + mini.h / 2}`,
+		)
+	} else {
+		check(
+			`${width}px 有标记时 chip 回到第一行`,
+			sameLine,
+			`chip.c=${r.chipT + r.chipH / 2} mini.c=${mini && mini.t + mini.h / 2}`,
+		)
+	}
+	console.log(`   ${width}px  工具栏高 ${r.toolbarH}  info 高 ${r.info.h}  标记 ${r.tag && r.tag.w}×${r.tag && r.tag.h}  重新抽取 ${r.refresh && r.refresh.w}px`)
+}
+console.log('')
+
+// ── 侧边栏宽度：图谱面板展开时自动加宽到 640px ──
 //
 // 出厂宽度 483px 放不下 Explorer（它自带一条约 240px 的左栏），所以插件在
 // 面板展开时把侧边栏拉到 600px。三条断言：会加宽、不反复触发、不越界。

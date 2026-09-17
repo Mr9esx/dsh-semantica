@@ -84,7 +84,7 @@ window.__ModuleLoader__.load({
 			"path.copied": "已复制",
 			"path.failed": "复制失败，请手动选中",
 			"action.dismiss": "关掉这条提示",
-			"state.emptyHint": "还没有图。点下面的「重新抽取」开始。",
+			"state.emptyHint": "还没有图。点「重新抽取」开始。",
 			"action.reload": "刷新",
 			"action.external": "在浏览器打开",
 			"state.loading": "正在载入 Explorer…",
@@ -200,7 +200,7 @@ window.__ModuleLoader__.load({
 .semg-mini{display:inline-flex;align-items:baseline;gap:3px;white-space:nowrap}
 .semg-mini b{font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}
 .semg-mini span{font-size:10px;color:var(--dsw-alias-label-secondary,#888)}
-.semg-tag{font-size:10px;padding:1px 6px;border-radius:999px;background:rgba(232,163,61,.16);color:#b57517;white-space:nowrap}
+.semg-tag{font-size:14px;line-height:20px;padding:0 8px;border-radius:999px;background:rgba(232,163,61,.16);color:#b57517;white-space:nowrap}
 /* 图文件路径。整条路径约 100 字符，工具栏放不下，所以显示的是省略形式（完整值在
    title 里，复制的也是完整值）。min-width:0 + overflow:hidden 让它能被压缩 ——
    否则它自己不收缩，会把 .semg-toolbar-info 顶出容器。 */
@@ -906,6 +906,22 @@ window.__ModuleLoader__.load({
 							stale
 								? h("span", { className: "semg-tag", title: T("note.stale") }, T("note.staleShort"))
 								: null,
+							// 重新抽取：紧跟在过期标记右边。这两者是「同一条消息」的「症状 + 处理」——
+							// 分开在两行里，看到「图已过期」的人还得自己去找补救按钮。
+							// 它不看 stale 状态，永远显示：没有图的时候也靠它建第一张。
+							h(
+								"button",
+								{
+									type: "button",
+									className: "semg-btn",
+									title: T("action.refresh"),
+									disabled: phase === "working",
+									onClick: () => run(true),
+								},
+								phase === "working"
+									? h("span", { className: "semg-spin semg-spin-sm" })
+									: T("action.refresh"),
+							),
 							// 落盘路径。放在统计数字之后 —— 它和那几个数字一样是「这张图的元信息」，
 							// 而不是操作。点一下复制完整路径。
 							stats && stats.graphPath
@@ -945,19 +961,6 @@ window.__ModuleLoader__.load({
 						h(
 							"div",
 							{ className: "semg-toolbar-util" },
-							h(
-								"button",
-								{
-									type: "button",
-									className: "semg-btn",
-									title: T("action.refresh"),
-									disabled: phase === "working",
-									onClick: () => run(true),
-								},
-								phase === "working"
-									? h("span", { className: "semg-spin semg-spin-sm" })
-									: T("action.refresh"),
-							),
 							url
 								? h(
 										"button",
