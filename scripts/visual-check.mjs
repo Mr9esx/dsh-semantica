@@ -127,6 +127,9 @@ let hostMissing = false
 let autoOn = false
 // 切图规则版本（假 host 侧的），用来验「规则变了，旧图还能不能被沿用」
 let stubScopeVersion = 2
+// 开关请求的原始 body（要验「改默认」那一发里没有 sessionId）
+const autoBodies = []
+let autoDefault = false
 // hangMode：/view 给一个「连得上但永远不回应」的地址 —— 用来验「iframe 永远不 load」时
 // 面板会不会一直转圈（用户报的就是这个症状）
 let hangMode = false
@@ -150,8 +153,19 @@ await page.route('**/api-semantica/**', async (route, request) => {
 		return route.fulfill({ json: { ok: true, file: '/tmp/harness/last-diag.json' } })
 	}
 	if (url.includes('/status'))
-		return route.fulfill({ json: { ...STATUS, scope: { version: stubScopeVersion }, auto: { on: autoOn } } })
+		return route.fulfill({
+			json: {
+				...STATUS,
+				scope: { version: stubScopeVersion },
+				auto: { on: autoOn, default: autoDefault, explicit: false },
+			},
+		})
 	if (url.includes('/auto')) {
+		autoBodies.push(body)
+		if (body.default !== undefined) {
+			autoDefault = body.default === true
+			return route.fulfill({ json: { ok: true, default: autoDefault } })
+		}
 		autoOn = body.on === true
 		return route.fulfill({ json: { ok: true, on: autoOn } })
 	}
@@ -239,6 +253,7 @@ window.__mount = (sessionId) => {
   window.__plugin.apply(ctx);
   window.__view = registered['conversation.view'][0];
   window.__headers = registered['conversation.session.header.actions'];
+  window.__inputRights = registered['conversation.input.right'] || [];
   window.__header = window.__headers[window.__headers.length - 1]; // 最后一个 = 打开面板那个
   window.__specs = specs;
   window.__specsOf = (name) => specs[name] || [];
@@ -294,6 +309,7 @@ window.__mountReal = (sessionId, options) => {
     b.textContent = label;
     b.addEventListener('click', () => {
       for (const other of tabStrip.querySelectorAll('[role=tab]')) other.setAttribute('aria-selected', String(other === b));
+      window.__setActiveView?.(id);
     });
     tabStrip.appendChild(b);
   }
@@ -311,9 +327,16 @@ window.__mountReal = (sessionId, options) => {
   viewArea.appendChild(viewOutlet);
   const sessionSlot = div('display:contents', { 'data-slot': 'conversation.session' }, [viewArea]);
 
-  const seat = div('flex:none;position:sticky;bottom:0;height:120px', { 'data-composer-seat': '' }, [
+  // 输入框那一排：核心把 conversation.input.right 渲染在 composer 里（ui-conversation 里是
+  // rightItems: renderSlot("conversation.input.right", zone)，zone 没会话时为 undefined）。
+  // 这里要照同一个形状造，不然「按钮在输入框那一排」这件事离线根本测不到。
+  // 注意：这个文件整段是模板字符串，注释里**不能出现反引号**（会被当成字符串结束）。
+  const composerRow = div('display:flex;align-items:center;gap:6px', { 'data-composer-row': '' }, [
     Object.assign(document.createElement('div'), { textContent: '输入框（假）' }),
   ]);
+  const inputRightHost = div('display:flex;align-items:center;gap:4px', { 'data-composer-input-right': '' });
+  composerRow.appendChild(inputRightHost);
+  const seat = div('flex:none;position:sticky;bottom:0;height:120px', { 'data-composer-seat': '' }, [composerRow]);
   const scrollBody = div(
     'flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden auto',
     { 'data-conversation-scroll': '' },
@@ -327,8 +350,30 @@ window.__mountReal = (sessionId, options) => {
   const injected = typeof meta.inject === 'function' ? meta.inject(sessionId) : {};
   const coreProps = { viewRequest: null, openView: () => {}, completeViewRequest: () => {} };
   window.__chain = { rootEl, scrollBody, seat, viewArea, viewOutlet, tabStrip };
-  window.__root = ReactDOM.createRoot(viewOutlet);
-  window.__root.render(React.createElement(window.__view, Object.assign({}, coreProps, injected)));
+  // 只有激活的那个视图才渲染（核心传 only: active.id）。默认是「对话」标签，
+  // 所以面板默认不挂载 —— 和真界面一致。
+  window.__viewRoot = ReactDOM.createRoot(viewOutlet);
+  window.__setActiveView = (id) => {
+    const wantPanel = id === 'semantica-graph';
+    window.__viewRoot.render(
+      wantPanel ? React.createElement(window.__view, Object.assign({}, coreProps, injected)) : null,
+    );
+  };
+  window.__setActiveView(opts.panel === true ? 'semantica-graph' : 'chat');
+  // 输入框那一排的注册项（每项各自的 inject）
+  const inputRightRoot = ReactDOM.createRoot(inputRightHost);
+  inputRightRoot.render(
+    React.createElement(
+      React.Fragment,
+      null,
+      (window.__specsOf('conversation.input.right') || []).map((m, i) => {
+        const Comp = (window.__inputRights || [])[i];
+        if (!Comp) return null;
+        const rProps = typeof m.inject === 'function' ? m.inject(sessionId) : {};
+        return React.createElement(Comp, Object.assign({ key: i }, rProps));
+      }),
+    ),
+  );
   // 头部按钮也照真实契约渲染：每个注册项各自拿到自己的 inject 结果
   // （openPanel 走 inject，开关按钮的 sessionId 也走 inject）
   window.__headerRoot = ReactDOM.createRoot(headerBtnHost);
@@ -377,6 +422,14 @@ check('视图注册项 id/顺序/文案对', viewMeta.id === 'semantica-graph' &
 check('视图注册项声明了 inject（核心不会把 sessionId 传成 props）', viewMeta.hasInject === true)
 
 const headerMeta = await page.evaluate(() => ((window.__specsOf || (() => []))('conversation.session.header.actions') || []).map((m) => ({ id: m.id, inject: typeof m.inject === 'function' })))
+const inputRightMeta = await page.evaluate(() =>
+	((window.__specsOf || (() => []))('conversation.input.right') || []).map((m) => ({ id: m.id, inject: typeof m.inject === 'function' })),
+)
+check(
+	'输入框那一排注册了「每轮提取」开关（用户要的位置）',
+	inputRightMeta.length === 1 && inputRightMeta[0].id === 'semantica-auto-input' && inputRightMeta[0].inject === true,
+	JSON.stringify(inputRightMeta),
+)
 check(
 	'头部注册了两个按钮：每轮提取开关 + 打开面板',
 	headerMeta.length === 2 && headerMeta.every((m) => m.inject === true) && headerMeta.some((m) => m.id === 'semantica-auto'),
@@ -557,43 +610,113 @@ check('决策页签显示了决策内容与关联实体', decisionsText.includes
 
 // ── 「每轮自动提取」开关 ──
 //
-// 用户要的是「对话里有个按钮，开了之后每轮都调 MCP」，所以这里验三件事：
-//   1. 对话头部（和面板工具栏）各有一个开关，且默认是「关」；
-//   2. 点一下真的把状态写进 host（POST /auto），按钮变「开」；
-//   3. 面板自己读到的状态也跟着变（两处入口是同一个开关）。
+// 用户要的是「对话里有个按钮，开了之后每轮都调 MCP」，而且他明确说了位置：
+//   「按钮放在 input，第一次输入不渲染上面的部分啊，我怎么点？」
+// 所以这里照**真实的两步**验：
+//   1. 聊天标签下（此时面板不挂载、输入框可见）：输入框那一排 + 标题右侧两处开关，
+//      默认都关，输入框那个是真的被布局出来的（不是 0 高度）；
+//   2. 从输入框那一排点开 → 真的 POST /auto → 两处一起变「开」；
+//   3. 切到图谱标签（面板这时才挂载）→ 面板工具栏那个读到的也是「开」；顺便验
+//      「新会话默认」这个开关 —— 新对话在第一条消息之前没有会话，只能靠它。
 
 await page.evaluate(() => window.__resetTree())
 await page.evaluate(() => window.__mountReal('session-visual-1'))
 await page.waitForTimeout(900)
 
-const autoBefore = await page.evaluate(() => ({
-	header: [...document.querySelectorAll('[data-semgp-auto]')].map((b) => ({
-		where: b.closest('[data-semgp-bar]') ? 'panel' : 'header',
-		state: b.getAttribute('data-semgp-auto'),
-		pressed: b.getAttribute('aria-pressed'),
-		text: (b.textContent || '').trim(),
-	})),
-}))
+const probeToggles = () =>
+	page.evaluate(() => ({
+		items: [...document.querySelectorAll('[data-semgp-auto]')].map((b) => ({
+			where: b.closest('[data-semgp-bar]')
+				? 'panel'
+				: b.closest('[data-composer-seat]')
+					? 'composer'
+					: b.closest('[data-semgp-root]')
+						? 'inside-panel?'
+						: 'header',
+			state: b.getAttribute('data-semgp-auto'),
+			pressed: b.getAttribute('aria-pressed'),
+			compact: b.hasAttribute('data-semgp-compact'),
+			h: Math.round(b.getBoundingClientRect().height),
+			text: (b.textContent || '').trim(),
+		})),
+	}))
+
+const autoBefore = (await probeToggles()).items
 check(
-	'头部与面板里各有一个开关，默认都是「关」',
-	autoBefore.header.length === 2 && autoBefore.header.every((b) => b.state === 'off' && b.pressed === 'false'),
-	JSON.stringify(autoBefore.header),
+	'聊天标签下有两处入口：输入框那一排 + 标题右侧，默认都是「关」',
+	autoBefore.length === 2 &&
+		autoBefore.every((b) => b.state === 'off' && b.pressed === 'false') &&
+		['composer', 'header'].every((w) => autoBefore.some((b) => b.where === w)),
+	JSON.stringify(autoBefore),
+)
+{
+	const composerBtn = autoBefore.find((b) => b.where === 'composer')
+	check(
+		'输入框那一排那个真的被布局出来了（有高度，不是 0）',
+		composerBtn?.compact === true && composerBtn.h >= 20 && composerBtn.h <= 30,
+		JSON.stringify(composerBtn),
+	)
+}
+
+// 从**输入框那一排**点（用户报的就是「按钮在标题那排我够不着」）
+const autoClicked = await page.evaluate(() => window.__clickText('图谱提取 关'))
+await page.waitForTimeout(300)
+const autoAfter = (await probeToggles()).items
+const autoPosts = requestLog.filter((r) => r.includes('/auto'))
+check('点输入框那一排的开关会打开它', autoClicked === true && autoAfter.every((b) => b.state === 'on'), JSON.stringify(autoAfter.map((b) => b.text)))
+check(
+	'开这一下真的写进了 host（POST /auto，带 sessionId）',
+	autoPosts.length === 1 && autoPosts[0].startsWith('POST /auto') && autoBodies[0].sessionId === 'session-visual-1',
+	JSON.stringify(autoBodies[0] ?? null),
+)
+check(
+	'标题右侧那处入口跟着一起变「开」（同一个开关）',
+	autoAfter.filter((b) => b.text.includes('开')).length === 2,
+	JSON.stringify(autoAfter.map((b) => b.text)),
 )
 
-const autoClicked = await page.evaluate(() => window.__clickText('每轮提取：关'))
-await page.waitForTimeout(250)
-const autoAfter = await page.evaluate(() => ({
-	states: [...document.querySelectorAll('[data-semgp-auto]')].map((b) => b.getAttribute('data-semgp-auto')),
-	texts: [...document.querySelectorAll('[data-semgp-auto]')].map((b) => (b.textContent || '').trim()),
-}))
-const autoPosts = requestLog.filter((r) => r.includes('/auto'))
-check('点头部开关会打开它（按钮变「开」）', autoClicked === true && autoAfter.states.every((v) => v === 'on'), JSON.stringify(autoAfter))
+// 切到知识图谱标签：面板这时才挂载（核心只渲染激活的视图），它读的是同一个状态
+await page.evaluate(() => window.__setActiveView('semantica-graph'))
+await page.waitForTimeout(900)
+const inPanel = await probeToggles()
+const panelBtn = inPanel.items.find((b) => b.where === 'panel')
 check(
-	'开这一下真的写进了 host（POST /auto）',
-	autoPosts.length === 1 && autoPosts[0].startsWith('POST /auto'),
-	JSON.stringify(autoPosts),
+	'切到图谱标签后面板里那个开关显示的是同一个状态（开）',
+	panelBtn?.state === 'on' && panelBtn.pressed === 'true',
+	JSON.stringify(panelBtn ?? null),
 )
-check('面板里那个开关跟着一起变成「开」（同一个开关）', autoAfter.texts.filter((t) => t.includes('开')).length === 2, JSON.stringify(autoAfter.texts))
+
+// 「新会话默认」：新对话在第一条消息之前没有会话，那时点不到任何按会话的开关，
+// 只能提前把默认设好 —— 这是「第一次输入也能自动提取」的唯一办法。
+const defaultLabel = await page.evaluate(() => {
+	const b = [...document.querySelectorAll('[data-semgp-sub] button')].find((x) => (x.textContent || '').includes('新会话默认'));
+	return b ? (b.textContent || '').trim() : null;
+})
+check('面板里有「新会话默认」这个开关', defaultLabel === '新会话默认：关', String(defaultLabel))
+await page.evaluate(() => window.__clickText('新会话默认：关'))
+await page.waitForTimeout(300)
+const defaultAfter = {
+	label: await page.evaluate(() => {
+		const b = [...document.querySelectorAll('[data-semgp-sub] button')].find((x) =>
+			(x.textContent || '').includes('新会话默认'),
+		);
+		return b ? (b.textContent || '').trim() : null;
+	}),
+	// requestLog 在 Node 侧，不能在 page.evaluate 里读（那边没有这个变量）
+	posted: requestLog.filter((r) => r.includes('/auto')).length,
+}
+check(
+	'点默认开关会写成 POST /auto {default:true}，并变成「开」',
+	defaultAfter.label === '新会话默认：开' && defaultAfter.posted === 2,
+	JSON.stringify(defaultAfter),
+)
+check(
+	'「改默认」那一发的请求体只有 default（不带 sessionId）',
+	autoBodies.length === 2 && autoBodies[1].default === true && autoBodies[1].sessionId === undefined,
+	JSON.stringify(autoBodies),
+)
+await page.evaluate(() => window.__clickText('新会话默认：开'))
+await page.waitForTimeout(200)
 
 // 关回去，别影响后面的用例
 await page.evaluate(() => window.__clickText('每轮提取：开'))
@@ -637,7 +760,7 @@ emptyMode = false // 切回「有内容」，后面的阶段不该继承空态
 hangMode = true
 await page.evaluate(() => window.__resetTree())
 await page.evaluate(() => window.__mount('session-visual-hang'))
-await page.evaluate(() => window.__mountReal('session-visual-hang'))
+await page.evaluate(() => window.__mountReal('session-visual-hang', { panel: true }))
 await page.waitForTimeout(900)
 const hangEarly = await page.textContent('[data-semgp-center]')
 check('挂住时先是「正在打开图…」', hangEarly.includes('正在打开图'), hangEarly.replace(/\s+/g, ' ').slice(0, 40))
@@ -696,18 +819,18 @@ hostMissing = false
 
 // 先出一次图（这一次本来就要请求），再重挂同一个会话：这一次该沿用，不该再请求
 await page.evaluate(() => window.__resetTree())
-await page.evaluate(() => window.__mountReal('session-visual-1'))
+await page.evaluate(() => window.__mountReal('session-visual-1', { panel: true }))
 await page.waitForTimeout(1100)
 const beforeAdopt = requestLog.filter((r) => r.includes('/view')).length
 await page.evaluate(() => window.__resetTree())
-await page.evaluate(() => window.__mountReal('session-visual-1'))
+await page.evaluate(() => window.__mountReal('session-visual-1', { panel: true }))
 await page.waitForTimeout(1100)
 const afterAdopt = requestLog.filter((r) => r.includes('/view')).length
 check('同版本重挂时沿用已有的图（不重复起 Explorer）', afterAdopt === beforeAdopt, `${beforeAdopt} → ${afterAdopt}`)
 
 stubScopeVersion = 3
 await page.evaluate(() => window.__resetTree())
-await page.evaluate(() => window.__mountReal('session-visual-1'))
+await page.evaluate(() => window.__mountReal('session-visual-1', { panel: true }))
 await page.waitForTimeout(1100)
 const afterVersionBump = requestLog.filter((r) => r.includes('/view')).length
 check(
@@ -731,7 +854,7 @@ await page.evaluate(() => {
 		/* 卸载失败不影响后面的重挂 */
 	}
 })
-await page.evaluate(() => window.__mountReal('session-visual-1'))
+await page.evaluate(() => window.__mountReal('session-visual-1', { panel: true }))
 await page.waitForTimeout(1200)
 
 const real = await page.evaluate(() => {
@@ -805,7 +928,7 @@ await page.evaluate(() => {
 		/* ignore */
 	}
 })
-await page.evaluate(() => window.__mountReal('session-visual-1', { hostile: true }))
+await page.evaluate(() => window.__mountReal('session-visual-1', { hostile: true, panel: true }))
 await page.waitForTimeout(900)
 const hostile = await page.evaluate(() => {
 	const rect = (sel) => {

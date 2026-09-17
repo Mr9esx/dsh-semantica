@@ -66,6 +66,11 @@ window.__ModuleLoader__.load({
 			"state.loadSlowHint": "多半是它已经被回收或者刚被重启过。点「重试」重新拉起一个；如果总是这样，去面板里看 Explorer 依赖是否齐全。",
 			"action.retry": "重试",
 			"auto.off": "每轮提取：关",
+			"auto.compactOff": "图谱提取 关",
+			"auto.compactOn": "图谱提取 开",
+			"auto.defaultOff": "新会话默认：关",
+			"auto.defaultOn": "新会话默认：开",
+			"auto.defaultHint": "新建的对话在发出第一条消息之前还没有会话，那时候任何按会话的开关都点不到 —— 所以「每条新对话一开始就自动提取」要靠这个默认值。点一下切换。",
 			"auto.on": "每轮提取：开",
 			"auto.offHint": "关着的时候，模型只在它觉得值得记的时候写图。点一下改成「每轮都写」。",
 			"auto.onHint": "开着的时候，模型每一轮回复结束前都要把这一轮的新知识写进图（会多花一些 token）。点一下关掉。",
@@ -127,6 +132,11 @@ window.__ModuleLoader__.load({
 			"state.loadSlowHint": "It was probably reaped or just restarted. Retry to start a fresh one.",
 			"action.retry": "Retry",
 			"auto.off": "Per-turn extract: off",
+			"auto.compactOff": "Graph extract: off",
+			"auto.compactOn": "Graph extract: on",
+			"auto.defaultOff": "New chats default: off",
+			"auto.defaultOn": "New chats default: on",
+			"auto.defaultHint": "A brand-new chat has no session until the first message, so no per-session switch can be clicked yet — use this default to make every new chat extract from the start. Click to toggle.",
 			"auto.on": "Per-turn extract: on",
 			"auto.offHint": "When off, the model only writes when it judges something worth keeping. Click to write every turn.",
 			"auto.onHint": "When on, the model must write this turn's new knowledge before finishing (costs extra tokens). Click to turn off.",
@@ -199,6 +209,8 @@ window.__ModuleLoader__.load({
 [data-semgp-auto="on"]{background:rgba(46,160,67,.16);border-color:rgba(46,160,67,.55);font-weight:600}
 [data-semgp-auto="on"]:hover{background:rgba(46,160,67,.24)}
 [data-semgp-auto="off"]{opacity:.72}
+/* 输入框那一排是「compact controls」，所以那里用短文案 + 更小的内边距，别把行撑开 */
+[data-semgp-compact]{padding:2px 8px;line-height:20px;border-radius:6px}
 [data-semgp-btn][disabled]{opacity:.5;cursor:default}
 [data-semgp-path]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;opacity:.85;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52ch}
 [data-semgp-body]{position:relative;flex:1 1 auto;min-height:0;display:flex}
@@ -1087,6 +1099,20 @@ window.__ModuleLoader__.load({
 							)
 						: null,
 					view && view.ms ? h("span", { "data-semgp-muted": "" }, `${view.ms}ms`) : null,
+					// 「新会话默认」：新对话在第一条消息之前没有会话，那时点不到任何按会话的开关，
+					// 所以「以后每条新对话都自动提取」只能靠这个默认值 —— 放在这里点一次就够。
+					h(
+						"button",
+						{
+							type: "button",
+							"data-semgp-btn": "",
+							"data-semgp-compact": "",
+							title: T("auto.defaultHint"),
+							disabled: auto.busy || auto.isDefault === null,
+							onClick: auto.flipDefault,
+						},
+						auto.isDefault === true ? T("auto.defaultOn") : T("auto.defaultOff"),
+					),
 				),
 
 				mcpMissing ? h("div", { "data-semgp-warn": "" }, T("state.mcpMissing")) : null,
@@ -1227,6 +1253,7 @@ window.__ModuleLoader__.load({
 		 */
 		function useAutoToggle(sessionId, fallback) {
 			const [on, setOn] = useState(typeof fallback === "boolean" ? fallback : null);
+			const [isDefault, setIsDefault] = useState(null);
 			const [busy, setBusy] = useState(false);
 
 			useEffect(() => {
@@ -1239,13 +1266,19 @@ window.__ModuleLoader__.load({
 						});
 						const data = await readJson(res);
 						// 拿不到就维持「未知」，不装作是关 —— 免得按钮显示的状态是假的
-						if (alive && data && data.ok === true && data.auto) setOn(data.auto.on === true);
+						if (alive && data && data.ok === true && data.auto) {
+							setOn(data.auto.on === true);
+							setIsDefault(data.auto.default === true);
+						}
 					} catch {
 						// 静默：host 半侧没起来时这个开关本来也用不了
 					}
 				})();
 				const onEvent = (e) => {
-					if (e && e.detail && e.detail.sessionId === sessionId) setOn(e.detail.on === true);
+					if (!e || !e.detail) return;
+					if (e.detail.sessionId === sessionId) setOn(e.detail.on === true);
+					// "*" = 默认值变了：没被单独设过的会话跟着变
+					if (e.detail.sessionId === "*") setIsDefault(e.detail.on === true);
 				};
 				window.addEventListener(AUTO_EVENT, onEvent);
 				return () => {
@@ -1270,7 +1303,24 @@ window.__ModuleLoader__.load({
 				}
 			}, [busy, on, sessionId]);
 
-			return { on, busy, flip };
+			/** 改「新会话默认值」—— 新建对话在第一条消息之前没有会话，只能靠它。 */
+			const flipDefault = useCallback(async () => {
+				if (busy) return;
+				const next = isDefault !== true;
+				setBusy(true);
+				setIsDefault(next);
+				try {
+					const data = await postJson("/api-semantica/auto", { default: next });
+					if (data.ok !== true) setIsDefault(!next);
+					else announceAuto("*", next);
+				} catch {
+					setIsDefault(!next);
+				} finally {
+					setBusy(false);
+				}
+			}, [busy, isDefault]);
+
+			return { on, busy, flip, isDefault, flipDefault };
 		}
 
 		/** 广播开关变化（同一个窗口里的另一个入口据此同步）。 */
@@ -1294,14 +1344,22 @@ window.__ModuleLoader__.load({
 		function AutoButton(props) {
 			const sessionId = props.sessionId || "";
 			const { on, busy, flip } = useAutoToggle(sessionId);
+			const compact = props.compact === true;
 
-			const label = on === true ? T("auto.on") : T("auto.off");
+			const label = compact
+				? on === true
+					? T("auto.compactOn")
+					: T("auto.compactOff")
+				: on === true
+					? T("auto.on")
+					: T("auto.off");
 			return h(
 				"button",
 				{
 					type: "button",
 					"data-semgp-btn": "",
 					"data-semgp-auto": on === true ? "on" : "off",
+					"data-semgp-compact": compact ? "" : undefined,
 					"aria-pressed": on === true ? "true" : "false",
 					title: on === true ? T("auto.onHint") : T("auto.offHint"),
 					disabled: on === null || busy || !sessionId,
@@ -1408,7 +1466,29 @@ window.__ModuleLoader__.load({
 				),
 			);
 
-			// 2) 会话标题右侧的「每轮自动提取」开关 —— 每轮要不要写图由它决定
+			// 2a) 「每轮自动提取」开关，放在**输入框那一排**右侧。
+			//
+			// 为什么放这儿：核心那排「上面的部分」（标题 + 标签）是会话级槽，新建对话在
+			// 发出第一条消息之前根本没有会话，于是整排都不渲染 —— 用户的原话是「第一次
+			// 输入不渲染上面的部分啊，我怎么点」。而输入框这一排就在他打字的地方。
+			// 槽位契约见 ui-conversation 的 slots：`conversation.input.right` 是
+			// 「Compact controls before the composer submit action」，list/session。
+			ctx.slots.inject("conversation.input.right", () =>
+				ctx.slots.register(
+					{
+						name: "conversation.input.right",
+						id: "semantica-auto-input",
+						order: 40,
+						locale: NS,
+						inject: (sessionId) => ({ sessionId, compact: true }),
+					},
+					AutoButton,
+				),
+			);
+
+			// 2b) 会话标题右侧也留一个（同一开关的另一处入口）。留在那儿是因为切到
+			// 「知识图谱」标签时输入框会被藏起来，标题那一排仍然在。
+
 			ctx.slots.inject("conversation.session.header.actions", () =>
 				ctx.slots.register(
 					{

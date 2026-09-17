@@ -426,9 +426,40 @@ check('缺 sessionId 时开关不写入，并回一个明确错误', autoNoId.js
 // 落盘 + 重启后还在（内存里同步读得到，是因为它在 load() 里读回来）
 const autoFile = join(work, 'dsh-semantica-graph', 'auto-extract.json')
 await call('/api-semantica/auto', { body: { sessionId: SESSION_A, on: true } })
-check('开关落盘了', existsSync(autoFile) && JSON.parse(readFileSync(autoFile, 'utf8'))[SESSION_A]?.on === true, autoFile)
+check(
+	'开关落盘了（新格式：default + sessions）',
+	existsSync(autoFile) &&
+		JSON.parse(readFileSync(autoFile, 'utf8')).sessions?.[SESSION_A]?.on === true,
+	autoFile,
+)
 const reopened = createToggleStore(autoFile)
 check('换一个 store 重新读（等价于重启）状态还在', reopened.isOn(SESSION_A) === true && reopened.isOn(SESSION_B) === false)
+
+// —— 「新会话默认」 ——
+//
+// 这一条是为用户那句「第一次输入不渲染上面的部分啊，我怎么点」加的：新建对话在发出
+// 第一条消息之前**根本没有会话**，核心那排标签/标题是会话级槽，那时整排都不渲染，
+// 任何「按会话」的开关都够不着。所以「以后每条新对话都自动提取」只能靠默认值提前设好。
+const SESSION_NEW = 'session-brand-new-9999'
+const defOff = await call('/api-semantica/status', { query: `?sessionId=${SESSION_NEW}` })
+check('没有单独设过的新会话跟着默认值（默认关）', defOff.json.auto?.on === false && defOff.json.auto?.default === false, JSON.stringify(defOff.json.auto))
+
+const defSet = await call('/api-semantica/auto', { body: { default: true } })
+check('能把新会话默认值设成「开」', defSet.json.ok === true && defSet.json.default === true, JSON.stringify(defSet.json))
+
+const defOn = await call('/api-semantica/status', { query: `?sessionId=${SESSION_NEW}` })
+check('之后新会话一上来就是「开」（第一条消息就已经自动提取）', defOn.json.auto?.on === true && defOn.json.auto?.default === true, JSON.stringify(defOn.json.auto))
+check('默认值不影响被单独设过的会话', autoStatus2.json.auto?.on === false && defOn.json.auto?.explicit === false, JSON.stringify({ a: autoStatus2.json.auto, n: defOn.json.auto }))
+
+const directiveNew = directiveVariable?.fn({ agent: { session: { header: { id: SESSION_NEW } } } }) ?? ''
+check('新会话拿到的提示词准则也是「每轮必写」', directiveNew.includes('每一轮回复结束前都必须'), directiveNew.slice(0, 30))
+
+// 单独关掉一个会话：即使默认是开，这个会话也关着
+await call('/api-semantica/auto', { body: { sessionId: SESSION_NEW, on: false } })
+const defOverride = await call('/api-semantica/status', { query: `?sessionId=${SESSION_NEW}` })
+check('默认开着时也能单独关掉某个会话', defOverride.json.auto?.on === false && defOverride.json.auto?.explicit === true, JSON.stringify(defOverride.json.auto))
+
+await call('/api-semantica/auto', { body: { default: false } })
 await call('/api-semantica/auto', { body: { sessionId: SESSION_A, on: false } })
 
 const statusNoKg = await call('/api-semantica/status', { query: `?sessionId=${SESSION_A}` })

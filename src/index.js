@@ -310,7 +310,11 @@ function apply(ctx, config) {
 						},
 						prompt: { injected: wantsPrompt, section: SECTION_NAME, directive: DIRECTIVE_VARIABLE },
 						scope: { version: SCOPE_VERSION },
-						auto: { on: autos.isOn(sessionId) },
+						auto: {
+							on: autos.isOn(sessionId),
+							default: autos.getDefault(),
+							explicit: autos.isExplicit(sessionId),
+						},
 						instruction: sessionId ? instructionFor(sessionId) : null,
 					})
 				} catch (err) {
@@ -330,9 +334,20 @@ function apply(ctx, config) {
 			handler: async (req, res) => {
 				try {
 					const body = await readBody(req)
+					// 两种改法：
+					//   { sessionId, on } —— 改这个会话（覆盖默认）；
+					//   { default: bool } —— 改新会话的默认值。
+					//   之所以要有第二种：新建对话在发出第一条消息之前没有会话，任何按会话
+					//   的开关那时候都点不到，只能提前把默认设好。
+					if (body?.default !== undefined) {
+						const on = autos.setDefault(body.default === true)
+						note(ctx, 'debug', `semantica-graph: 新会话的每轮自动提取默认值 → ${on ? '开' : '关'}`)
+						send(res, 200, { ok: true, default: on })
+						return
+					}
 					const sessionId = String(body?.sessionId ?? '')
 					if (!sessionId) {
-						send(res, 200, { ok: false, error: '缺少 sessionId' })
+						send(res, 200, { ok: false, error: '缺少 sessionId（改新会话默认请传 default）' })
 						return
 					}
 					const on = autos.set(sessionId, body?.on === true)
