@@ -215,7 +215,7 @@ add_relationship(source, target, type, metadata = { "conversation": "<sessionId>
 `semantica.explorer --graph` 是**启动时读一次**，所以图变了就得重启那个子进程 ——
 `ExplorerHost` 按 key 管实例（最多 3 个，闲置 10 分钟回收），点「刷新」就是重建一个。
 
-**`<key>` 末尾带着切图规则的版本号**（`kg.js` 里的 `SCOPE_VERSION`）。这不是装饰：Explorer
+**`<key>` 末尾带着切图规则的版本号**（`kg.js` 里的 `SCOPE_VERSION`，当前 `3`）。这不是装饰：Explorer
 只在启动时读图，前端切标签回来还会**沿用**已经建好的那个 iframe —— 所以「改了认领规则」
 如果不换 key，用户重新点开面板看到的还是按旧规则切的图，会以为 bug 没修。规则一改就
 把版本号 +1，旧视图与旧实例自然失效，下次打开必然是新的。（views 目录只留最近 12 份。）

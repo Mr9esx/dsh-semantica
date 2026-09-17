@@ -33,7 +33,8 @@ function check(label, ok, detail) {
 
 const STATS = { nodes: 42, edges: 51, entities: 30, relations: 38, decisions: 4, byType: [{ type: 'PRODUCT', count: 20 }] }
 // byTime 已经不在了：时间窗兜底认领被删掉（它会把别人的决策算进本对话）
-const CLAIM = { tagged: 30, byEntity: 2, untagged: 3, totalSemantic: 33, untaggedDecisions: 2 }
+// byEdge = 「我这次写过的边连到的节点」数（节点被别的会话抢走标之后，靠它把节点拉回视图）
+const CLAIM = { tagged: 30, byEdge: 1, byEntity: 2, untagged: 3, totalSemantic: 33, untaggedDecisions: 2 }
 const KG = { path: '/tmp/harness/dsh-semantica-graph/kg.json', mtime: Date.now(), bytes: 4096 }
 const VIEW_PATH = '/graph-view'
 
@@ -182,7 +183,7 @@ await page.route('**/api-semantica/**', async (route, request) => {
 					mode: body.mode,
 					key: `${body.mode}:${body.sessionId}:v${stubScopeVersion}`,
 					stats: { ...STATS, nodes: 0, edges: 0, entities: 0, relations: 0, decisions: 0 },
-					claim: { tagged: 0, byEntity: 0, untagged: 3, totalSemantic: 33, untaggedDecisions: 2 },
+					claim: { tagged: 0, byEdge: 0, byEntity: 0, untagged: 3, totalSemantic: 33, untaggedDecisions: 2 },
 					kg: KG,
 					ms: 12,
 				},
@@ -900,6 +901,18 @@ check(
 		const info = document.querySelector('[data-semgp-info]').getBoundingClientRect();
 		return { infoTop: info.top - bar.top, infoBottom: bar.bottom - info.bottom, barH: bar.height };
 	})
+	// 归属说明要把「节点是怎么进来的」说全：本会话标的 + 我写过的边连到的 + 认领来的决策
+{
+	const scopedText = await page.evaluate(() => {
+		const el = document.querySelector('[data-semgp-info]')
+		return (el?.textContent || '').replace(/\s+/g, ' ')
+	})
+	check(
+		'归属说明里有「其中 1 个是我这次写过的边连到的」（节点被抢走标时能解释清楚）',
+		scopedText.includes('其中 1 个是我这次写过的边连到的'),
+		scopedText.slice(0, 120),
+	)
+}
 	check(
 		'说明和路径确实在工具栏那一行里（上下都没被挤出去）',
 		rowFit.infoTop >= 0 && rowFit.infoBottom >= 0,

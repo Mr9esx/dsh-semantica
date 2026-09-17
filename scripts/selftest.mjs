@@ -143,6 +143,49 @@ check(
 	`edges=${scopedA.edges.length}`,
 )
 
+// 视图里不能有悬空边：边的两端必须都在视图节点里。
+// 真发生过（用户机器上那张图）：会话 A 建的 `guangzhou` 被会话 B 用同一个 id 复用，
+// add_entity 是整体覆盖的 upsert，节点上的 metadata（含会话标）被整个换掉 → A 亲手建的
+// 节点从 A 的视图里消失，而 A 写的那条边还在，于是视图里留下一条指向不存在节点的边。
+const danglingOf = (sc) => {
+	const ids = new Set(sc.nodes.map((n) => String(n.id)))
+	return sc.edges.filter((e) => !ids.has(String(e.source_id)) || !ids.has(String(e.target_id)))
+}
+check(
+	'视图里没有悬空边（边两端都在视图节点里）',
+	danglingOf(scopedA).length === 0,
+	JSON.stringify(danglingOf(scopedA).map((e) => `${e.source_id}->${e.target_id}`)),
+)
+check(
+	'本会话写过的边，两端也进视图（B 写了 vue→esbuild，esbuild 就跟着进来）',
+	scopedB2.nodes.some((n) => n.id === 'esbuild') &&
+		scopedB2.edges.some((e) => e.source_id === 'vue' && e.target_id === 'esbuild') &&
+		danglingOf(scopedB2).length === 0,
+	`B=${scopedB2.nodes.map((n) => n.id).join(',')} claim.byEdge=${scopedB2.claim.byEdge}`,
+)
+check(
+	'本会话写的边数记在 claim.byEdge 里（界面上说得清这节点是怎么进来的）',
+	scopedB2.claim.byEdge === 1 && scopedA.claim.byEdge === 0,
+	`A.byEdge=${scopedA.claim.byEdge} B.byEdge=${scopedB2.claim.byEdge}`,
+)
+// 复现用户机器上那个覆盖：把 esbuild 的会话标改成 B（等于 B 复用同一 id 把它抢走）
+{
+	const stolen = JSON.parse(JSON.stringify(graph))
+	const esbuild = stolen.nodes.find((n) => n.id === 'esbuild')
+	esbuild.properties.metadata = { conversation: SESSION_B }
+	const scopedAfterTheft = scopeGraph(stolen, { sessionId: SESSION_A, mode: 'conversation' })
+	check(
+		'节点被别的会话抢走标之后，A 仍然看得到它（因为 A 写过连它的边）',
+		scopedAfterTheft.nodes.some((n) => n.id === 'esbuild') && scopedAfterTheft.claim.byEdge === 1,
+		`nodes=${scopedAfterTheft.nodes.map((n) => n.id).join(',')}`,
+	)
+	check(
+		'被抢走之后视图里也不出现悬空边',
+		danglingOf(scopedAfterTheft).length === 0,
+		JSON.stringify(danglingOf(scopedAfterTheft).map((e) => `${e.source_id}->${e.target_id}`)),
+	)
+}
+
 const scopedAll = scopeGraph(graph, { sessionId: SESSION_A, mode: 'all', window: DECISION_WINDOW })
 check('「全部」模式不切图', scopedAll.nodes.length === graph.nodes.length, `nodes=${scopedAll.nodes.length}`)
 check(

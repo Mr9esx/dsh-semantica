@@ -189,7 +189,9 @@ function cleanEdges(edges, byId) {
  * 这个版本号进视图的 key，所以规则一变，旧的视图文件与 Explorer 实例自然失效，
  * 面板下次打开必然重新出图。v2 = 删掉时间窗兜底认领的那一版。
  */
-export const SCOPE_VERSION = 2
+// 3：修了「节点被别的会话覆盖标之后，本会话视图里留下指向不存在节点的悬空边」——
+//    见 scopeGraph 里「本会话写过的边，两端也跟着进视图」那一段。
+export const SCOPE_VERSION = 3
 
 export function scopeGraph(graph, opts) {
 	const sessionId = String(opts.sessionId ?? '')
@@ -205,6 +207,7 @@ export function scopeGraph(graph, opts) {
 			edges: cleanEdges(graph.edges, byId),
 			claim: {
 				tagged: semantic.filter(hasAnyTag).length,
+				byEdge: 0,
 				byEntity: 0,
 				untagged: semantic.filter((n) => !hasAnyTag(n)).length,
 				totalSemantic: semantic.length,
@@ -218,6 +221,28 @@ export function scopeGraph(graph, opts) {
 		if (tagMatches(tagOf(n), sessionId)) kept.add(String(n.id))
 	}
 	const taggedNodes = kept.size
+
+	// 1.5) 本会话**写过**的边，两端也算本会话的东西。
+	//
+	// 为什么需要这一段（真事，不是防御性编程）：semantica 的 add_entity 是按 id 做整体
+	// 覆盖的 upsert。会话 A 建了 `guangzhou`（metadata.conversation = A），会话 B 后来
+	// 复用了同一个 id，节点上的 properties（连同 metadata）被整个换掉 —— 类型从 Location
+	// 变成 City，会话标变成 B，A 写的 user_city 等字段全丢。于是「A 亲手建的节点」从 A 的
+	// 视图里消失，而 A 那条 guangzhou -HAS_WEATHER_OBSERVATION-> obs 的边还在（边上的标
+	// 是 A 写的，不会被人覆盖）→ 视图里出现一条指向不存在节点的悬空边。
+	//
+	// 归属的正确读法：**我写过它**（写过节点、或写过它的边）它就是我的知识。所以这里把
+	// 本会话写的边的两端并进来（只 1 跳，不递归），悬空边也就不可能存在了。
+	let byEdge = 0
+	for (const e of graph.edges) {
+		if (!tagMatches(edgeTagOf(e), sessionId)) continue
+		for (const raw of [e?.source_id, e?.target_id]) {
+			const id = String(raw ?? '')
+			if (!id || kept.has(id) || !byId.has(id)) continue
+			kept.add(id)
+			byEdge += 1
+		}
+	}
 
 	// 2) 决策认领：只认「挂在本会话实体上」的那种（record_decision 没有 metadata，
 	//    entities 边是它唯一的会话归属信号）
@@ -251,22 +276,10 @@ export function scopeGraph(graph, opts) {
 	const keptById = new Map(nodes.map((n) => [String(n.id), n]))
 	const edges = cleanEdges(graph.edges, keptById)
 
-	// 边自带本会话标的也算 —— 两个端点被别的会话标着、但这条边是本会话写的时候要留下，
-	// 否则会出现「节点看得见、边却没了」。
-	for (const e of graph.edges) {
-		if (!tagMatches(edgeTagOf(e), sessionId)) continue
-		const s = String(e?.source_id)
-		const t = String(e?.target_id)
-		if (!byId.has(s) || !byId.has(t)) continue
-		if (edges.some((x) => x.source_id === s && x.target_id === t && x.type === e.type)) continue
-		edges.push({
-			source_id: s,
-			target_id: t,
-			type: e.type,
-			weight: e.weight ?? 1,
-			properties: e.properties ?? {},
-		})
-	}
+	// 这里以前还有一遍「边自带本会话标也算」：它把边塞进视图前只检查两个端点在**全图**里
+	// 存在（byId），没检查在**视图节点集**里（keptById）—— 于是专门制造悬空边。
+	// 现在本会话写的边的两端已经在上面第 1.5 步进了视图，cleanEdges 自然会把它们留下，
+	// 这一遍纯属多余且有害，删掉。
 
 	const totalSemantic = live.filter((n) => !DECISION_TYPES.has(String(n.type))).length
 	return {
@@ -275,6 +288,7 @@ export function scopeGraph(graph, opts) {
 		edges,
 		claim: {
 			tagged: taggedNodes,
+			byEdge,
 			byEntity,
 			untaggedDecisions: live.filter((n) => String(n.type) === 'decision' && !kept.has(String(n.id))).length,
 			// 没打任何会话标的语义节点 —— 它们只可能出现在「全部」里

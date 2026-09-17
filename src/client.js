@@ -90,6 +90,7 @@ window.__ModuleLoader__.load({
 			"state.noNodesHint":
 				"图里有别的会话写入的内容。开下面这个开关，模型从下一轮开始就会自己写进来；也可以点「复制提取指令」当场补一次，或者切到「全部」看整张图。",
 			"state.taggedOnly": "本对话 {n} 个节点",
+			"state.byEdge": "其中 {n} 个是我这次写过的边连到的",
 			"state.claimByEntity": "按实体边认领 {n} 条决策",
 			// 曾经有「按时间认领」这句 —— 那条兜底规则会把别的会话的决策算进来，已删除
 			"state.untaggedNote": "图里还有 {n} 个节点没打会话标，只出现在「全部」里",
@@ -160,6 +161,7 @@ window.__ModuleLoader__.load({
 			"state.noNodesHint":
 				"The graph holds other chats' content. Turn on the switch below and the model writes from the next turn on; you can also copy the prompt to backfill now, or switch to “All”.",
 			"state.taggedOnly": "{n} nodes in this chat",
+			"state.byEdge": "{n} of them linked by an edge I wrote",
 			"state.claimByEntity": "{n} decisions claimed by entity edges",
 			"state.claimByTime": "{n} decisions claimed by time",
 			"state.untaggedNote": "{n} nodes carry no conversation tag (visible under “All”)",
@@ -1113,6 +1115,7 @@ window.__ModuleLoader__.load({
 										// 被省略号收掉时，完整解释在这里（悬停可看）
 										title: [
 											mode === "conversation" ? Tn("state.taggedOnly", claim.tagged) : null,
+											claim.byEdge ? Tn("state.byEdge", claim.byEdge) : null,
 											claim.byEntity ? Tn("state.claimByEntity", claim.byEntity) : null,
 											claim.untagged ? Tn("analysis.untaggedNote", claim.untagged) : null,
 										]
@@ -1121,6 +1124,7 @@ window.__ModuleLoader__.load({
 									},
 									[
 										mode === "conversation" ? Tn("state.taggedOnly", claim.tagged) : null,
+										claim.byEdge ? Tn("state.byEdge", claim.byEdge) : null,
 										claim.byEntity ? Tn("state.claimByEntity", claim.byEntity) : null,
 										claim.untagged ? Tn("analysis.untaggedNote", claim.untagged) : null,
 									]
