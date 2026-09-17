@@ -22,9 +22,7 @@ import { join } from 'node:path'
 import { SemanticaWorker, probeSemantica, resolvePython } from './semantica-bridge.js'
 import {
   resolveDshHome,
-  resolveSessionFile,
-  readSessionText,
-  parseEvents,
+  readSessionEvents,
   buildConversation,
 } from './session-reader.js'
 import { ExplorerHost, probeExplorer } from './explorer.js'
@@ -189,16 +187,26 @@ function apply(ctx) {
         }
       }
 
-      // 1) 找日志并按「事件条数」做签名
-      const file = await resolveSessionFile(ctx, sessionId)
-      if (!file) {
+      // 1) 用官方服务读会话事件，并按「事件条数」做签名
+      //
+      // 走 sessionPersistence 的 list() + inspect() —— 这是 DSH 内部给「轨迹」供数的
+      // 同一个接口，返回结构化事件，不用我们自己解多帧 zstd、解打包的 chunk-run、
+      // 也不用处理 torn tail。实测同一会话：API 1.0s / 过滤后 11,910 个事件，
+      // 读文件 7.9s / 61,108 行，而两条路产出的对话结构逐项一致。
+      let read
+      try {
+        read = await readSessionEvents(ctx, sessionId)
+      } catch (error) {
         return {
           code: 200,
-          payload: { ok: false, code: 'session-not-found', error: `找不到会话日志：${sessionId}` },
+          payload: {
+            ok: false,
+            code: 'session-not-found',
+            error: String(error?.message ?? error),
+          },
         }
       }
-
-      const events = parseEvents(readSessionText(file))
+      const events = read.events
       const sig = `${events.length}`
       const graphPath = graphPathFor(sessionId)
 
@@ -218,7 +226,7 @@ function apply(ctx) {
             stale: live.signature !== sig,
             url: live.url,
             stats: cached.stats,
-            source: file,
+            source: read.persistedId,
           },
         }
       }
@@ -274,14 +282,20 @@ function apply(ctx) {
         ...out.stats,
         graphPath,
         buildMs: Date.now() - t0,
-        session: { id: sessionId, title: conversation.title ?? null, file },
+        session: {
+          id: sessionId,
+          persistedId: read.persistedId,
+          title: conversation.title ?? null,
+          events: events.length,
+          rawEvents: read.totalEvents,
+        },
         conversation: { stats: conversation.stats },
       }
       graphCache.set(sessionId, { sig, graphPath, stats, builtAt: Date.now() })
 
       return {
         code: 200,
-        payload: { ok: true, cached: false, url: inst.url, stats, source: file },
+        payload: { ok: true, cached: false, url: inst.url, stats, source: read.persistedId },
       }
     }
 

@@ -8,8 +8,22 @@
 // 只会拿到开头那行 session header（实测 197 字节），把整个会话读成空的。
 // fzstd 会连续解完所有帧，因此用它做主路径；node:zlib 仅作单帧兜底。
 //
-// 读取路径优先走 host 服务 ctx.sessionPersistence（list + locate 拿绝对产物路径），
-// 服务缺席时回退到直接扫描 $DSH_HOME/sessions。
+// 有两条读取路径，用途不同，**不要混用**：
+//
+//   · 插件（宿主侧）走 readSessionEvents(ctx, sessionId) —— 调官方服务
+//     ctx.sessionPersistence 的 list() + inspect()，拿到的是**结构化事件**。
+//     这是 DSH 内部给「轨迹」供数的同一个接口。
+//   · 离线脚本（scripts/rebuild-graph.mjs 等，进程外跑）走 resolveSessionFile()
+//     + readSessionText() + parseEvents() 直接读日志文件。
+//
+// 两条路实测产出**逐项一致**的对话结构（同一会话：turns 48 / messages 1350 /
+// toolCalls 2302 / decisions 23 / segmentChars 212433 完全相同），所以离线脚本
+// 的量测结果对插件有效。差别只在这几点：
+//
+//   API   inspect() 1.0s，返回 1,767,163 个事件 → 过滤掉 streaming chunk 后 11,910 个
+//   文件  解压+逐行解析 7.9s，61,108 行（日志里 chunk 是**打包**成 chunk-run 记录的）
+//
+// 也就是说 API 快约 7.8 倍，而且不用自己处理多帧 zstd、打包的 chunk、torn tail。
 //
 // ── 为什么读取路径只有「读文件」这一条 ──
 //
@@ -275,6 +289,49 @@ function parseAnswers(raw) {
   const a = raw.indexOf('{')
   const b = raw.lastIndexOf('}')
   return a >= 0 && b > a ? tryParse(raw.slice(a, b + 1)) : null
+}
+
+/**
+ * 会话事件里**不需要**的高频流式增量。
+ *
+ * 日志把 assistant/chunk 打成 chunk-run 记录，所以读文件时看不到这么多；
+ * 而 inspect() 会把它们**全部解包**出来（实测 1,767,163 → 过滤后 11,910，
+ * chunk 占 99.3%）。它们和 assistant/message 内容冗余，对建图没有价值。
+ */
+const CHUNK_EVENT_TYPES = new Set(['assistant/chunk'])
+
+/** 去掉 `session-` 前缀，用于把插件拿到的 id 和持久化层的权威 id 对齐。 */
+function bareSessionId(id) {
+  return String(id).replace(/^session-/, '')
+}
+
+/**
+ * 用官方服务读取会话事件（插件走的唯一路径）。
+ *
+ * 为什么必须这样做 id 对齐：持久化层认的 id **就是磁盘目录名** —— 顶层会话是
+ * `session-<uuid>`，多数子会话（origin=subagent）是裸 `<uuid>`。而插件从 DSH
+ * 客户端拿到的是**裸 uuid**，直接拿去 inspect() 会报 SessionPersistenceNotFoundError。
+ * 所以先用 list() 取权威 header 再比裸 id —— 一次命中，不是「试两种形态」。
+ *
+ * @param ctx 宿主上下文，只需能 get('sessionPersistence')
+ * @param sessionId 插件侧拿到的会话 id（裸 uuid 或带前缀都可以）
+ * @returns 结构化事件数组（已过滤流式增量）
+ */
+export async function readSessionEvents(ctx, sessionId) {
+  const persistence = ctx?.get?.('sessionPersistence')
+  if (!persistence) {
+    throw new Error('sessionPersistence 服务不可用，无法读取会话（不降级到读文件：见文件头说明）')
+  }
+  const headers = await persistence.list()
+  const wanted = bareSessionId(sessionId)
+  const header = headers.find((h) => bareSessionId(h.id) === wanted)
+  if (!header) {
+    throw new Error(`会话 ${sessionId} 不在持久化索引里（共 ${headers.length} 个会话）`)
+  }
+  const view = await persistence.inspect(header.id)
+  const all = view?.events ?? []
+  const events = all.filter((e) => !CHUNK_EVENT_TYPES.has(e.type))
+  return { events, persistedId: header.id, totalEvents: all.length }
 }
 
 /**
