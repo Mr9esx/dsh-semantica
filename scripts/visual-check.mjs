@@ -520,7 +520,7 @@ const chain = await page.evaluate(() => {
 		root: rect('#root'),
 		pluginRoot: rect('[data-semgp-root]'),
 		bar: rect('[data-semgp-bar]'),
-		sub: rect('[data-semgp-sub]'),
+		info: rect('[data-semgp-info]'),
 		body: rect('[data-semgp-body]'),
 		canvas: rect('[data-semgp-canvas]'),
 		holder: rect('[data-semgp-holder]'),
@@ -727,13 +727,13 @@ const defaultInfo = await page.evaluate(() => {
 	return {
 		text: (b.textContent || '').trim(),
 		inBar: Boolean(b.closest('[data-semgp-bar]')),
-		inSub: Boolean(b.closest('[data-semgp-sub]')),
+		inInfo: Boolean(b.closest('[data-semgp-info]')),
 		hint: b.getAttribute('title') || '',
 	};
 })
 check(
-	'「新对话默认」开关在工具栏里（不再自占一行），文案说人话',
-	defaultInfo?.text === '新对话默认：关' && defaultInfo.inBar === true && defaultInfo.inSub === false,
+	'「新对话默认」开关在工具栏那一行里，文案说人话',
+	defaultInfo?.text === '新对话默认：关' && defaultInfo.inBar === true && defaultInfo.inInfo === false,
 	JSON.stringify(defaultInfo),
 )
 check(
@@ -769,15 +769,15 @@ const pathInfo = await page.evaluate(() => {
 	return {
 		tag: b.tagName,
 		inBar: Boolean(b.closest('[data-semgp-bar]')),
-		inSub: Boolean(b.closest('[data-semgp-sub]')),
+		inInfo: Boolean(b.closest('[data-semgp-info]')),
 		title: b.getAttribute('title') || '',
 		h: Math.round(r.height),
 		cursor: getComputedStyle(b).cursor,
 	};
 })
 check(
-	'图文件路径在工具栏里（不再单独一行），是个可点的按钮',
-	pathInfo?.tag === 'BUTTON' && pathInfo.inBar === true && pathInfo.inSub === false && pathInfo.h >= 18,
+	'图文件路径在工具栏里、和说明同一组（不是单独一行），是个可点的按钮',
+	pathInfo?.tag === 'BUTTON' && pathInfo.inBar === true && pathInfo.inInfo === true && pathInfo.h >= 18,
 	JSON.stringify(pathInfo),
 )
 check(
@@ -824,7 +824,7 @@ const layout = await page.evaluate(() => {
 	const bar = document.querySelector('[data-semgp-bar]');
 	const body = document.querySelector('[data-semgp-body]');
 	const canvas = document.querySelector('[data-semgp-canvas]');
-	const sub = document.querySelector('[data-semgp-sub]');
+	const info = document.querySelector('[data-semgp-info]');
 	// 注意：DOMRect 跨 page.evaluate 传回来会变成 {}（属性在原型上，序列化丢光），
 	// 所以这里当场摊平成普通数字。
 	const r = (el) => {
@@ -847,7 +847,7 @@ const layout = await page.evaluate(() => {
 		barRect: r(bar),
 		barOverflow: overflow(bar),
 		barKids: bar ? bar.children.length : 0,
-		subOverflow: overflow(sub),
+		infoOverflow: overflow(info),
 		bodyTop: r(body)?.top ?? null,
 		barBottom: r(bar)?.bottom ?? null,
 		canvasH: Math.round(r(canvas)?.h ?? 0),
@@ -856,10 +856,50 @@ const layout = await page.evaluate(() => {
 	};
 })
 check(
-	'工具栏在 1380px 宽度下排得下（一行，没挤成两行）',
+	'工具栏是**一行**（用户明确要求，不许拆成两行）',
 	layout.barRect.h <= 44,
 	JSON.stringify({ h: layout.barRect.h, kids: layout.barKids }),
 )
+check(
+	'工具栏卡片到 iframe 的间距只有 root 那 10px，中间不再夹着别的行',
+	layout.bodyTop !== null && layout.barBottom !== null && Math.round(layout.bodyTop - layout.barBottom) === 10,
+	JSON.stringify({ barBottom: Math.round(layout.barBottom), bodyTop: Math.round(layout.bodyTop), gap: Math.round(layout.bodyTop - layout.barBottom) }),
+)
+// 窗口窄一点也还是一行：说明会收成省略号，而不是掉到第二行
+{
+	await page.setViewportSize({ width: 1100, height: 820 })
+	await page.waitForTimeout(300)
+	const narrow = await page.evaluate(() => {
+		const bar = document.querySelector('[data-semgp-bar]');
+		const info = document.querySelector('[data-semgp-info]');
+		return {
+			barH: Math.round(bar.getBoundingClientRect().height),
+			infoW: Math.round(info.getBoundingClientRect().width),
+			infoText: (info.textContent || '').trim().slice(0, 24),
+			pathShown: (document.querySelector('[data-semgp-path]')?.textContent || '').trim(),
+		};
+	})
+	check(
+		'窗口缩到 1100px，工具栏仍然是**一行**（说明被压缩，没有掉下去）',
+		narrow.barH <= 44 && narrow.infoW > 40,
+		JSON.stringify(narrow),
+	)
+	await page.setViewportSize({ width: 1380, height: 820 })
+	await page.waitForTimeout(300)
+}
+{
+	// 信息组必须和按钮在**同一行**：它的上下边不能跑到工具栏之外
+	const rowFit = await page.evaluate(() => {
+		const bar = document.querySelector('[data-semgp-bar]').getBoundingClientRect();
+		const info = document.querySelector('[data-semgp-info]').getBoundingClientRect();
+		return { infoTop: info.top - bar.top, infoBottom: bar.bottom - info.bottom, barH: bar.height };
+	})
+	check(
+		'说明和路径确实在工具栏那一行里（上下都没被挤出去）',
+		rowFit.infoTop >= 0 && rowFit.infoBottom >= 0,
+		JSON.stringify(rowFit),
+	)
+}
 check(
 	'工具栏里的子元素没有溢出它的盒子',
 	layout.barOverflow !== null && layout.barOverflow <= 1,
@@ -877,19 +917,29 @@ check(
 	JSON.stringify({ barLeft: Math.round(layout.barRect.left), rootLeft: Math.round(layout.rootRect.left), gapRight: Math.round(layout.rootRight - layout.canvasRight) }),
 )
 
-// 分组顺序：图 [模式 统计] → 路径 ┊ 写图开关 [每轮提取 新对话默认] ┊ 操作
+// 一行里的分组：看哪个图 [模式 统计] → 这是什么/在哪 [说明 路径] ┊ 开关 ┊ 操作
 const barOrder = await page.evaluate(() =>
 	[...document.querySelector('[data-semgp-bar]').children].map((el) => {
-		for (const k of ['path', 'auto', 'default', 'div', 'seg', 'stats', 'spacer']) {
+		for (const k of ['info', 'auto', 'default', 'div', 'seg', 'stats', 'spacer']) {
 			if (el.hasAttribute('data-semgp-' + k)) return k;
 		}
 		return (el.textContent || '').trim();
 	}),
 )
 check(
-	'工具栏按「图 → 路径 ┊ 开关 ┊ 操作」分三组，默认开关紧挨着每轮提取',
-	barOrder.join(' ').includes('path div auto default div'),
+	'工具栏一行分三段：图+统计 → 说明+路径 ┊ 写图开关 ┊ 操作',
+	barOrder.join(' ') === 'seg stats info div auto default div 刷新 分析 在浏览器打开 复制提取指令',
 	JSON.stringify(barOrder),
+)
+const infoOrder = await page.evaluate(() =>
+	[...document.querySelector('[data-semgp-info]').children].map((el) =>
+		el.hasAttribute('data-semgp-path') ? 'path' : (el.textContent || '').trim().slice(0, 12),
+	),
+)
+check(
+	'信息组里是「归属说明 + 耗时 + 路径」，路径在最后（它是信息，不是操作）',
+	infoOrder.at(-1) === 'path' && infoOrder.length >= 2,
+	JSON.stringify(infoOrder),
 )
 check(
 	'工具栏带 1px 边框 + 8px 圆角',
@@ -921,7 +971,7 @@ const emptyDebug = await page.evaluate(() => ({
 	centerText: document.querySelector('[data-semgp-center]')?.textContent?.slice(0, 60) ?? null,
 	canvasText: document.querySelector('[data-semgp-canvas]')?.textContent?.replace(/\s+/g, ' ').slice(0, 120) ?? null,
 	stats: document.querySelector('[data-semgp-stats]')?.textContent?.replace(/\s+/g, ' ') ?? null,
-	sub: document.querySelector('[data-semgp-sub]')?.textContent?.replace(/\s+/g, ' ') ?? null,
+	info: document.querySelector('[data-semgp-info]')?.textContent?.replace(/\s+/g, ' ') ?? null,
 	hasFrame: Boolean(document.querySelector('[data-semgp-frame-host]')),
 	html: document.querySelector('[data-semgp-canvas]')?.innerHTML?.slice(0, 300) ?? null,
 }))

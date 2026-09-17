@@ -199,13 +199,22 @@ window.__ModuleLoader__.load({
 		const CSS = `
 /* 面板的 content padding：整个面板内容离边框 16px（用户要求）。
    box-sizing 必须在，否则 100% 高度会再撑出 32px。*/
-[data-semgp-root]{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12px;box-sizing:border-box;padding:16px;gap:12px}
+[data-semgp-root]{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12px;box-sizing:border-box;padding:16px;gap:10px}
 /* 工具栏：一条卡片（边框 + 8px 圆角），不再是「贴着顶边的一条分隔线」。
    背景保持透明 —— 免得在深浅两套主题下自己猜底色猜错。*/
+/* 工具栏卡片：**一行**（用户要求，别再拆成两行）。
+   一行里按「图+统计  →  这是什么/在哪  ┊  写图开关  ┊  操作」排，两组之间一条小竖线。
+   信息那一组（归属说明 + 路径）可以压缩、超长出省略号，所以它永远不会把这一行挤成两行。*/
 [data-semgp-bar]{display:flex;align-items:center;flex-wrap:wrap;gap:8px;box-sizing:border-box;min-height:34px;padding:8px 12px;border:1px solid rgba(128,128,128,.28);border-radius:8px;background:transparent}
-/* 副行：工具栏下面那行浅色补充说明。已经不需要分隔线了 —— 工具栏本身是卡片，
-   间距由 root 的 gap 负责（用户问「为什么这玩意要单独一行」，路径已经搬进工具栏）。*/
-[data-semgp-sub]{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:0 2px;color:rgba(128,128,128,.95)}
+/* 信息组：归属说明 + 图文件路径。**和按钮在同一行**，只是长得浅一点。
+   min-width:0 + overflow:hidden + 内部省略号 = 空间不够时它先被压缩，
+   这样这一行无论多窄都不会被挤成两行（顶多说明变成「…」）。*/
+/* flex:1 1 0 是关键：带 wrap 的 flex 容器是**先按理想尺寸决定换行、再压缩**的，
+   所以「内容很长但可以压缩」的元素如果按内容尺寸参与排版，它会被整块推到第二行，
+   而不是被压扁。把基准尺寸设成 0（flex-basis:0）+ 允许收缩，它才会老实待在这一行里，
+   只把自己的文字收成省略号。用户要的就是一行，这里踩过一次，别再改回去。*/
+[data-semgp-info]{display:inline-flex;align-items:center;justify-content:flex-end;gap:10px;flex:1 1 0;min-width:0;overflow:hidden;color:rgba(128,128,128,.95)}
+[data-semgp-info] > [data-semgp-muted]{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 [data-semgp-spacer]{flex:1 1 auto}
 /* 工具栏里的小竖线：把「看哪个图 / 写图的开关 / 操作」三组分开，比纯空格子清楚 */
 [data-semgp-div]{width:1px;height:16px;background:rgba(128,128,128,.32);flex:none}
@@ -224,7 +233,7 @@ window.__ModuleLoader__.load({
 [data-semgp-compact]{padding:2px 8px;line-height:20px;border-radius:6px}
 [data-semgp-btn][disabled]{opacity:.5;cursor:default}
 /* 路径按钮：等宽、单行、超长省略（完整路径在 title 里，点一下复制），鼠标给 copy 光标 */
-[data-semgp-path]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;opacity:.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:34ch;cursor:copy}
+[data-semgp-path]{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;opacity:.9;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:30ch;min-width:9ch;flex:0 1 auto;cursor:copy}
 [data-semgp-body]{position:relative;flex:1 1 auto;min-height:0;display:flex;gap:12px}
 /* min-height 是保命的：这根画布的高度原本全靠 height:100% 一路传下来，只要任一层祖先
    给不出确定高度（.viewArea 是 flex:1 0 auto; min-height:auto，属于会变的那种），
@@ -1051,7 +1060,14 @@ window.__ModuleLoader__.load({
 				"div",
 				{ "data-semgp-root": "" },
 
-				// —— 工具栏 ——
+				// —— 工具栏（一张卡片，一行）——
+				//
+				// 一行里分三段：看哪个图（[本对话|全部] + 统计）→ 这是什么/在哪（归属说明 + 路径）
+				// ┊ 写图开关（每轮提取 + 新对话默认）┊ 操作（刷新/分析/打开/复制指令）。
+				//
+				// 路径是**信息**不是操作，所以它跟归属说明放一起，不跟按钮混。
+				// 信息这组可以压缩：空间不够时它先出省略号，这一行不会被挤成两行
+				// （用户明确要求过一行 —— 别再拆）。
 				h(
 					"div",
 					{ "data-semgp-bar": "" },
@@ -1070,28 +1086,56 @@ window.__ModuleLoader__.load({
 						{ "data-semgp-stats": "" },
 						statItems.map(([key, value]) => h(Stat, { key, label: T(key), value: value === null ? "—" : value })),
 					),
-					h("span", { "data-semgp-spacer": "" }),
-					// 图文件路径：点一下复制。放在工具栏里（用户：「为什么这玩意要单独一行啊，
-					// 和工具栏放在一起」），长路径用省略号收住，title 里是全文。
-					kgPath
-						? h(
-								"button",
-								{
-									type: "button",
-									"data-semgp-btn": "",
-									"data-semgp-path": "",
-									title: `${T("path.hint")}\n${kgPath}`,
-									onClick: () => {
-										void copyText(kgPath).then((ok) => {
-											setPathCopied(ok);
-											setTimeout(() => setPathCopied(false), 1400);
-										});
+					// —— 信息组：归属说明 + 路径（同一行，浅色，吃掉中间剩余空间）——
+					h(
+						"span",
+						{ "data-semgp-info": "" },
+						claim
+							? h(
+									"span",
+									{
+										"data-semgp-muted": "",
+										// 被省略号收掉时，完整解释在这里（悬停可看）
+										title: [
+											mode === "conversation" ? Tn("state.taggedOnly", claim.tagged) : null,
+											claim.byEntity ? Tn("state.claimByEntity", claim.byEntity) : null,
+											claim.untagged ? Tn("analysis.untaggedNote", claim.untagged) : null,
+										]
+											.filter(Boolean)
+											.join(" · "),
 									},
-								},
-								pathCopied ? T("action.copied") : shortPath(kgPath),
-							)
-						: null,
+									[
+										mode === "conversation" ? Tn("state.taggedOnly", claim.tagged) : null,
+										claim.byEntity ? Tn("state.claimByEntity", claim.byEntity) : null,
+										claim.untagged ? Tn("analysis.untaggedNote", claim.untagged) : null,
+									]
+										.filter(Boolean)
+										.join(" · "),
+								)
+							: null,
+						view && view.ms ? h("span", { "data-semgp-muted": "" }, `${view.ms}ms`) : null,
+						// 图文件路径：点一下复制。完整路径在 tooltip 里。
+						kgPath
+							? h(
+									"button",
+									{
+										type: "button",
+										"data-semgp-btn": "",
+										"data-semgp-path": "",
+										title: `${T("path.hint")}\n${kgPath}`,
+										onClick: () => {
+											void copyText(kgPath).then((ok) => {
+												setPathCopied(ok);
+												setTimeout(() => setPathCopied(false), 1400);
+											});
+										},
+									},
+									pathCopied ? T("action.copied") : shortPath(kgPath),
+								)
+							: null,
+					),
 					h("span", { "data-semgp-div": "" }),
+					// 「每轮提取」和「新对话默认」是一对：一个管这个对话，一个管以后新开的
 					h(
 						"button",
 						{
@@ -1105,7 +1149,6 @@ window.__ModuleLoader__.load({
 						},
 						autoOn ? `● ${T("auto.on")}` : T("auto.off"),
 					),
-					// 「新对话默认」紧挨着「每轮提取」——它俩是一对，中间不插别的
 					h(
 						"button",
 						{
@@ -1125,29 +1168,6 @@ window.__ModuleLoader__.load({
 					h(Btn, { onClick: () => setDrawer((v) => !v) }, drawer ? T("analysis.close") : T("action.analysis")),
 					view && view.url ? h(Btn, { href: view.url }, T("action.external")) : null,
 					h(Btn, { onClick: copy, disabled: !instruction }, copied ? T("action.copied") : T("action.copy")),
-				),
-
-				// —— 归属说明 ——
-				//
-				// 路径和「新对话默认」都搬进工具栏了（用户：「为什么这玩意要单独一行啊，
-				// 和工具栏放在一起」）。这行只剩「本对话这个图是怎么切出来的」这类补充信息。
-				h(
-					"div",
-					{ "data-semgp-sub": "" },
-					claim
-						? h(
-								"span",
-								{ "data-semgp-muted": "" },
-								[
-									mode === "conversation" ? Tn("state.taggedOnly", claim.tagged) : null,
-									claim.byEntity ? Tn("state.claimByEntity", claim.byEntity) : null,
-									claim.untagged ? Tn("analysis.untaggedNote", claim.untagged) : null,
-								]
-									.filter(Boolean)
-									.join(" · "),
-							)
-						: null,
-					view && view.ms ? h("span", { "data-semgp-muted": "" }, `${view.ms}ms`) : null,
 				),
 
 				mcpMissing ? h("div", { "data-semgp-warn": "" }, T("state.mcpMissing")) : null,
