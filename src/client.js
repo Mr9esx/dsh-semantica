@@ -55,6 +55,9 @@ window.__ModuleLoader__.load({
 			"action.analysis": "分析",
 			"action.external": "在浏览器打开",
 			"path.hint": "点击复制这个文件的完整路径",
+			"path.fromProfile": "路径来自 profile「{n}」里写死的 SEMANTICA_KG_PATH（MCP 实际读写的就是它）",
+			"path.fromEnv": "路径来自环境变量 SEMANTICA_KG_PATH",
+			"path.fromDefault": "路径是按安装脚本的默认约定拼的（profile 里没写 SEMANTICA_KG_PATH）",
 			"action.copy": "复制提取指令",
 			"action.copied": "已复制",
 			"mode.conversation": "本对话",
@@ -121,6 +124,9 @@ window.__ModuleLoader__.load({
 			"action.analysis": "Analysis",
 			"action.external": "Open in browser",
 			"path.hint": "Click to copy this file's full path",
+			"path.fromProfile": "Path comes from SEMANTICA_KG_PATH in profile \"{n}\" (what the MCP server actually reads and writes)",
+			"path.fromEnv": "Path comes from the SEMANTICA_KG_PATH environment variable",
+			"path.fromDefault": "Path follows the installer's default convention (no SEMANTICA_KG_PATH in the profile)",
 			"action.copy": "Copy extract prompt",
 			"action.copied": "Copied",
 			"mode.conversation": "This chat",
@@ -1018,7 +1024,14 @@ window.__ModuleLoader__.load({
 			useEffect(() => {
 				if (!sessionId) return undefined;
 				const timer = setTimeout(() => {
-					const diag = collectDiag("mount", { mode, stats, hasView: Boolean(view && view.url) });
+					const diag = collectDiag("mount", {
+						mode,
+						stats,
+						hasView: Boolean(view && view.url),
+						// 面板读的是哪个图文件、这个路径是哪来的 —— 真环境核对时全靠这两项
+						kgPath: kgPath || null,
+						kgSource: kgSource || null,
+					});
 					void postJson("/api-semantica/diag", { sessionId, mode, reason: "mount", diag }).catch(() => {});
 				}, 600);
 				return () => clearTimeout(timer);
@@ -1033,6 +1046,8 @@ window.__ModuleLoader__.load({
 			const stats = (view && view.stats) || (analysis && analysis.stats) || (fallbackStats && fallbackStats.stats) || null;
 			const claim = (view && view.claim) || (analysis && analysis.claim) || (fallbackStats && fallbackStats.claim) || null;
 			const kgPath = (status && status.kg && status.kg.path) || "";
+			// 这个路径是哪来的 —— 用户改过 profile 时，得能说清面板读的是哪一份
+			const kgSource = (status && status.kg && status.kg.source) || "";
 			const instruction = (status && status.instruction) || "";
 			const mcpMissing = Boolean(status && status.mcp && status.mcp.configured === false);
 			const noNodes = Boolean(view && stats && stats.nodes === 0);
@@ -1122,7 +1137,15 @@ window.__ModuleLoader__.load({
 										type: "button",
 										"data-semgp-btn": "",
 										"data-semgp-path": "",
-										title: `${T("path.hint")}\n${kgPath}`,
+										title: [
+											T("path.hint"),
+											kgPath,
+											kgSource.startsWith("profile:")
+												? Tn("path.fromProfile", kgSource.slice("profile:".length))
+												: kgSource === "env"
+													? T("path.fromEnv")
+													: T("path.fromDefault"),
+										].join("\n"),
 										onClick: () => {
 											void copyText(kgPath).then((ok) => {
 												setPathCopied(ok);

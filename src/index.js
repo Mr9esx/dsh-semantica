@@ -113,26 +113,92 @@ function send(res, code, payload) {
 	res.end(body)
 }
 
-/** MCP 那条配置在不在这台机器的 profile 里（没配的话工具根本不会出现，值得提醒）。 */
-function mcpConfigured(home) {
+/**
+ * 从 profile 的 cordis.patch.yml 文本里抠出 SEMANTICA_KG_PATH 的值。
+ *
+ * 就是安装脚本写进去的那一行：
+ *   env:
+ *     SEMANTICA_KG_PATH: '/Users/.../dsh-semantica-graph/kg.json'
+ * 所以这里按「一行 key: value」抠，顺手去掉引号、展开 `~`。
+ */
+function kgPathFromPatch(text) {
+	const m = /^[ \t]*SEMANTICA_KG_PATH:[ \t]*(.+?)[ \t]*$/m.exec(text)
+	if (!m) return null
+	let v = m[1].trim()
+	if ((v.startsWith("'") && v.endsWith("'")) || (v.startsWith('"') && v.endsWith('"'))) {
+		v = v.slice(1, -1)
+	}
+	if (v.startsWith('~/')) v = join(process.env.HOME || '', v.slice(2))
+	return v.trim() || null
+}
+
+/**
+ * 扫一遍所有 profile 的 cordis.patch.yml，找出 MCP 那条配置。
+ *
+ * 返回每一项：`{ profile, kgPath, hasPlugin }`。`hasPlugin` 用来在多个 profile 都配了
+ * 的时候挑「装了本插件的那一个」—— 同一台机器上 web / cli 两个 profile 各配一份是正常的。
+ */
+function scanMcpProfiles(home) {
 	const dir = join(home, 'profiles')
+	const hits = []
 	try {
 		for (const entry of readdirSync(dir, { withFileTypes: true })) {
 			if (!entry.isDirectory()) continue
 			const patch = join(dir, entry.name, 'cordis.patch.yml')
 			if (!existsSync(patch)) continue
-			const text = readFileSync(patch, 'utf8')
-			if (text.includes('mcp-semantica') || text.includes('semantica-mcp')) return true
+			let text = ''
+			try {
+				text = readFileSync(patch, 'utf8')
+			} catch {
+				continue
+			}
+			if (!text.includes('mcp-semantica') && !text.includes('semantica-mcp')) continue
+			hits.push({
+				profile: entry.name,
+				kgPath: kgPathFromPatch(text),
+				hasPlugin: existsSync(join(dir, entry.name, 'node_modules', DATA_DIR)),
+			})
 		}
 	} catch {
-		return false
+		// 没有 profiles 目录 = 没配过，交给调用方兜底
 	}
-	return false
+	return hits
 }
 
-/** MCP 的图文件路径（安装脚本写进 SEMANTICA_KG_PATH 的就是它）。 */
-function kgPath(home) {
+/** MCP 那条配置在不在这台机器的 profile 里（没配的话工具根本不会出现，值得提醒）。 */
+function mcpConfigured(home) {
+	return scanMcpProfiles(home).length > 0
+}
+
+/** 没配 profile 时的兜底：按安装脚本的约定拼（<harness>/dsh-semantica-graph/kg.json）。 */
+function defaultKgPath(home) {
 	return join(home, DATA_DIR, 'kg.json')
+}
+
+/**
+ * **图文件到底在哪。**
+ *
+ * 以前这里是 `join(home, DATA_DIR, 'kg.json')` —— 插件自己按约定拼了一遍。那是错的：
+ * 真正决定 MCP 子进程读写哪个文件的是 profile 里写死的 `SEMANTICA_KG_PATH`，用户改了
+ * 那里（或者装到别的目录），面板显示的路径就和实际用的不是同一个，而面板还让你点它复制。
+ *
+ * 取值顺序（前者赢）：
+ *   1. profile 里写死的 SEMANTICA_KG_PATH —— 它就是 MCP 子进程实际用的那个；
+ *   2. 插件自己进程里有没有这个环境变量 —— 没在 patch 里覆盖时，子进程会继承它；
+ *   3. 约定路径（安装脚本的默认位置）。
+ *
+ * @returns `{ path, source, profiles }`：`source` 用来在界面上说清这个路径是哪来的。
+ */
+function resolveKgPath(home) {
+	const hits = scanMcpProfiles(home)
+	const withPath = hits.filter((h) => h.kgPath)
+	if (withPath.length) {
+		const pick = withPath.find((h) => h.hasPlugin) ?? withPath[0]
+		return { path: pick.kgPath, source: `profile:${pick.profile}`, profiles: hits.length }
+	}
+	const env = process.env.SEMANTICA_KG_PATH
+	if (env && env.trim()) return { path: env.trim(), source: 'env', profiles: hits.length }
+	return { path: defaultKgPath(home), source: 'default', profiles: hits.length }
 }
 
 /** 「每轮自动提取」开关的落盘位置。 */
@@ -192,7 +258,9 @@ function pruneViews(home, keep) {
  */
 async function loadScoped(ctx, sessionId, mode) {
 	const home = resolveDshHome()
-	const path = kgPath(home)
+	// 路径以 profile 里写死的 SEMANTICA_KG_PATH 为准（见 resolveKgPath 的注释）
+	const resolved = resolveKgPath(home)
+	const path = resolved.path
 	const graph = readGraph(path)
 	if (!graph) {
 		const err = new Error('图文件还不存在')
@@ -201,7 +269,12 @@ async function loadScoped(ctx, sessionId, mode) {
 		throw err
 	}
 	const scoped = scopeGraph(graph, { sessionId, mode })
-	return { graph, scoped, home, kg: { path, mtime: graphMtime(path), bytes: graph.bytes } }
+	return {
+		graph,
+		scoped,
+		home,
+		kg: { path, source: resolved.source, mtime: graphMtime(path), bytes: graph.bytes },
+	}
 }
 
 function apply(ctx, config) {
@@ -283,7 +356,8 @@ function apply(ctx, config) {
 					const url = new URL(req.url ?? '/', 'http://x')
 					const sessionId = url.searchParams.get('sessionId') ?? ''
 					const probe = await probeExplorer()
-					const path = kgPath(home)
+					const resolved = resolveKgPath(home)
+					const path = resolved.path
 					const exists = existsSync(path)
 					let nodes = 0
 					let edges = 0
@@ -298,7 +372,18 @@ function apply(ctx, config) {
 					}
 					send(res, 200, {
 						ok: true,
-						kg: { path, exists, mtime: graphMtime(path), nodes, edges },
+						kg: {
+							path,
+							// 这个路径是哪来的（profile / 环境变量 / 默认约定）——
+							// 用户改过 profile 时，界面能说清它读的是哪一份
+							source: resolved.source,
+							// 路径和安装脚本的默认约定不一样时，界面值得提一句
+							nonDefault: path !== defaultKgPath(home),
+							exists,
+							mtime: graphMtime(path),
+							nodes,
+							edges,
+						},
 						mcp: { configured: mcpConfigured(home) },
 						explorer: {
 							ok: probe.ok,

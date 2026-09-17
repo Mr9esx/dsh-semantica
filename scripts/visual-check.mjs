@@ -62,7 +62,8 @@ const ANALYSIS = {
 
 const STATUS = {
 	ok: true,
-	kg: { path: KG.path, exists: true, mtime: KG.mtime, nodes: 42, edges: 51 },
+	// source = 这个路径是哪来的（host 从 profile 里读的）；界面 tooltip 会说出来
+	kg: { path: KG.path, source: 'profile:web', nonDefault: false, exists: true, mtime: KG.mtime, nodes: 42, edges: 51 },
 	mcp: { configured: true },
 	explorer: { ok: true, version: '0.6.8', python: '/x/python', missing: [], hint: null, running: [] },
 	prompt: { injected: true, section: 'plugin:semantica-graph', directive: 'semantica_directive' },
@@ -785,6 +786,11 @@ check(
 	pathInfo.title.includes('/') && pathInfo.title.includes('复制'),
 	pathInfo.title,
 )
+check(
+	'路径 tooltip 说清了它来自哪个 profile（host 读的是 profile 里写死的那一个）',
+	pathInfo.title.includes('profile「web」'),
+	pathInfo.title.replace(/\n/g, ' / '),
+)
 check('路径按钮的鼠标光标是 copy（一眼看得出能复制）', pathInfo.cursor === 'copy', String(pathInfo.cursor))
 
 await page.evaluate(() => document.querySelector('[data-semgp-path]').click())
@@ -1152,6 +1158,15 @@ check(
 // 诊断通道：面板把自己量到的真 DOM 回传了（host 会落成 last-diag.json）
 const diag = diagBodies.at(-1)?.diag
 check('面板回传了真 DOM 几何（诊断通道）', Boolean(diag && Array.isArray(diag.chain) && diag.chain.length >= 2), JSON.stringify({ chain: diag?.chain?.length, reason: diag?.reason }))
+{
+	// 注意：最后一条诊断可能是输入框开关那条（reason=composer-toggle），所以按 reason 找
+	const mountDiag = diagBodies.map((b) => b?.diag).find((d) => d?.reason === 'mount')
+	check(
+		'诊断里带上了图文件路径和它的来源（真环境核对用）',
+		(mountDiag?.extra?.kgPath || '').includes('kg.json') && mountDiag?.extra?.kgSource === 'profile:web',
+		JSON.stringify({ path: mountDiag?.extra?.kgPath, source: mountDiag?.extra?.kgSource }),
+	)
+}
 check(
 	'诊断里带了滚动容器 / 输入框 / 是否隐藏的状态',
 	Boolean(diag?.scroll && diag.scroll.hideComposerAttr !== undefined && diag.seat && diag.cssLoaded === true),

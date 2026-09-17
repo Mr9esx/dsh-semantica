@@ -523,6 +523,79 @@ const badRes = await call('/api-semantica/analysis', { body: {} })
 check('没给会话 id 时明确报错（不是静默）', badRes.json.ok === false && badRes.json.code === 'no-session', JSON.stringify(badRes.json))
 
 // 收尾：走一遍清理函数，把 Explorer 子进程收掉
+// ── 图文件路径：以 profile 里写死的 SEMANTICA_KG_PATH 为准 ──
+//
+// 这条是给一个真会咬人的场景兜底的：MCP 子进程读写的图文件由 profile 里的
+// SEMANTICA_KG_PATH 决定，插件以前却自己按约定拼路径。用户改过那里（或装到别的目录）
+// 时，面板显示的路径就与实际用的不是同一个 —— 而面板还让你点它复制。
+{
+	const profilesDir = join(work, 'profiles', 'web')
+	mkdirSync(profilesDir, { recursive: true })
+	const customDir = join(work, 'elsewhere')
+	mkdirSync(customDir, { recursive: true })
+	const customKg = join(customDir, 'my-graph.json')
+	// 写一张「一眼认得出」的图：只有一个节点，和约定位置那张完全不同
+	writeFileSync(
+		customKg,
+		JSON.stringify({ graph_id: 'custom', nodes: [{ id: 'only-here', label: '只有这个文件里才有' }], edges: [] }),
+	)
+	writeFileSync(
+		join(profilesDir, 'cordis.patch.yml'),
+		[
+			'- id: mcp-semantica',
+			'  config:',
+			'    servers:',
+			'      semantica:',
+			'        command: semantica-mcp',
+			'        env:',
+			`          SEMANTICA_KG_PATH: '${customKg}'`,
+			'',
+		].join('\n'),
+	)
+
+	const custom = await call('/api-semantica/status', { query: `?sessionId=${SESSION_A}` })
+	check(
+		'MCP 配了自定义图路径时，status 报的是 profile 里那一个（不是插件自己拼的）',
+		custom.json.kg?.path === customKg,
+		JSON.stringify({ got: custom.json.kg?.path, want: customKg }),
+	)
+	check(
+		'读的也确实是那个文件（节点数来自自定义图）',
+		custom.json.kg?.exists === true && custom.json.kg?.nodes === 1,
+		JSON.stringify({ exists: custom.json.kg?.exists, nodes: custom.json.kg?.nodes }),
+	)
+	check(
+		'status 说出了这个路径是哪来的（profile 名）',
+		custom.json.kg?.source === 'profile:web' && custom.json.kg?.nonDefault === true,
+		JSON.stringify({ source: custom.json.kg?.source, nonDefault: custom.json.kg?.nonDefault }),
+	)
+	check('配了 MCP 就算 configured（文件在别的目录也算）', custom.json.mcp?.configured === true, JSON.stringify(custom.json.mcp))
+
+	// 出图也必须用那一张：切出来的节点是自定义图里的那个
+	const customView = await call('/api-semantica/view', {
+		body: { sessionId: SESSION_A, mode: 'all' },
+	})
+	const viewFile = customView.json.viewPath
+	const customGraphOk =
+		customView.json.ok === true &&
+		typeof viewFile === 'string' &&
+		existsSync(viewFile) &&
+		JSON.stringify(JSON.parse(readFileSync(viewFile, 'utf8')).nodes).includes('only-here')
+	check('出图用的是 profile 指的那张图', customGraphOk, JSON.stringify({ ok: customView.json.ok, viewFile }))
+
+	// profile 里没写 SEMANTICA_KG_PATH 时退回约定路径
+	writeFileSync(join(profilesDir, 'cordis.patch.yml'), '- id: mcp-semantica\n  config:\n')
+	const fallback = await call('/api-semantica/status', { query: `?sessionId=${SESSION_A}` })
+	check(
+		'profile 里没写路径时退回安装脚本的默认约定',
+		fallback.json.kg?.path === join(work, 'dsh-semantica-graph', 'kg.json') &&
+			fallback.json.kg?.source === 'default' &&
+			fallback.json.kg?.nonDefault === false,
+		JSON.stringify({ path: fallback.json.kg?.path, source: fallback.json.kg?.source }),
+	)
+	check('退回约定路径后读到的还是原来那张图', fallback.json.kg?.nodes > 1, String(fallback.json.kg?.nodes))
+}
+
 for (const d of disposers) {
 	try {
 		d()
