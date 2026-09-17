@@ -121,6 +121,9 @@ const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
 			host.appendChild(panel)
 
 			const widthWrites = []
+			// 头部入口按钮是通过 slots 注册的，这里把它抓出来，
+			// 好在后面单独塞进一个仿真的 DSH 头部里量布局。
+			window.__headerAction = null
 			const mod = window.__plugin.factory((n) => {
 				if (n === 'react') return React
 				throw new Error(`意外的 require("${n}")`)
@@ -134,7 +137,13 @@ const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
 					: k === 'locale' ? { getLocale: () => ({ active: 'zh-CN', locales: [], revision: 1 }) }
 					: undefined,
 				on: () => {}, effect: (fn) => fn(),
-				slots: { inject: (_n, cb) => cb(), register: () => () => {} },
+				slots: {
+					inject: (_n, cb) => cb(),
+					register: (desc, comp) => {
+						if (desc.name === 'conversation.session.header.actions') window.__headerAction = { desc, comp }
+						return () => {}
+					},
+				},
 				inject: (deps, cb) => cb({ get: (k) => (deps.includes(k) ? ctx.get(k) : undefined) }),
 			}
 			window.fetch = async () => ({
@@ -256,6 +265,75 @@ check(
 	`视口 ${drawer.viewportW}px，写入 ${JSON.stringify(drawer.widthWrites)}`,
 )
 await page.setViewportSize({ width: 1280, height: 720 })
+console.log('')
+
+// ── 头部入口按钮：图标 + 文案，且不能把标题挤坏 ──
+//
+// 这个按钮坐在 DSH 的 conversation.session.header.actions 里，那一排是
+// `flex:none`（宽度由内容决定、自己不收缩），而左边 .titleCluster 是
+// `flex:1;min-width:0`（会被压、标题走省略号）。所以按钮每宽 1px，标题就少 1px ——
+// 只断言「有文案」不够，得在真实的三段式布局里量它有没有把标题顶没。
+console.log('── 头部入口按钮')
+const HEADER_CSS = `
+  .hdr{box-sizing:border-box;padding:12px 28px 0 20px;width:100%}
+  .titleRow{align-items:center;gap:0;min-height:32px;display:flex}
+  .titleCluster{flex:1;align-items:center;gap:10px;min-width:0;display:flex}
+  .crumbs{white-space:nowrap;align-items:center;gap:4px;min-width:0;display:flex;overflow:hidden}
+  .crumbCurrent{color:#222;cursor:default;font-weight:500;max-width:220px;text-overflow:ellipsis;white-space:nowrap;font-size:14px;line-height:20px;overflow:hidden}
+  .headerActions{flex:none;align-items:center;gap:8px;display:flex}
+  .headerUtilities{flex:none;align-items:center;gap:8px;margin-left:20px;display:flex}
+  .util{width:26px;height:26px;border-radius:6px;background:#00000010}
+`
+for (const viewportW of [1380, 1100, 900]) {
+	const hr = await page.evaluate(
+		async ({ viewportW, css }) => {
+			const host = document.getElementById('host')
+			host.innerHTML = ''
+			const style = document.createElement('style')
+			style.textContent = css
+			document.head.appendChild(style)
+			const row = document.createElement('div')
+			row.className = 'hdr'
+			row.style.width = `${viewportW}px`
+			row.id = `hdr-${viewportW}`
+			row.innerHTML = `
+				<div class="titleRow">
+					<div class="titleCluster"><div class="crumbs"><span class="crumbCurrent">${
+						'把 semantica 做成一个 dsh 插件，点击之后在侧边栏展示'.repeat(2)
+					}</span></div></div>
+					<div class="headerActions" id="ha-${viewportW}"></div>
+					<div class="headerUtilities"><span class="util"></span></div>
+				</div>`
+			host.appendChild(row)
+			const slot = row.querySelector(`#ha-${viewportW}`)
+			const root = ReactDOM.createRoot(slot)
+			root.render(React.createElement(window.__headerAction.comp, { sessionId: 'sess-visual', openPanel: () => {} }))
+			await new Promise((res) => setTimeout(res, 200))
+			const btn = slot.querySelector('button')
+			const cluster = row.querySelector('.titleCluster')
+			const crumbs = row.querySelector('.crumbs')
+			const b = btn && btn.getBoundingClientRect()
+			return {
+				text: btn ? btn.textContent.trim() : null,
+				btnW: b ? Math.round(b.width) : 0,
+				btnH: b ? Math.round(b.height) : 0,
+				clusterW: cluster ? Math.round(cluster.getBoundingClientRect().width) : 0,
+				titleClipped: crumbs ? crumbs.scrollWidth > crumbs.clientWidth + 1 : false,
+				overflowX: row.scrollWidth - row.clientWidth,
+				ariaLabel: btn ? btn.getAttribute('aria-label') : null,
+				title: btn ? btn.getAttribute('title') : null,
+			}
+		},
+		{ viewportW, css: HEADER_CSS },
+	)
+	const tag = `视口 ${viewportW}px`
+	console.log(`   ${tag}  按钮 ${hr.btnW}×${hr.btnH}  标题区 ${hr.clusterW}  标题被截断=${hr.titleClipped}`)
+	check(`${tag}：按钮带文案「${hr.text}」`, hr.text === '知识图谱', String(hr.text))
+	check(`${tag}：按钮尺寸正常`, hr.btnW > 40 && hr.btnW <= 120 && hr.btnH === 22, `${hr.btnW}×${hr.btnH}`)
+	check(`${tag}：整行不横向溢出`, hr.overflowX === 0, `溢出 ${hr.overflowX}px`)
+	check(`${tag}：标题区仍有空间（${hr.clusterW}px）`, hr.clusterW > 120, `${hr.clusterW}px`)
+	check(`${tag}：aria-label / title 都在`, !!hr.ariaLabel && !!hr.title, `${hr.ariaLabel} / ${hr.title}`)
+}
 console.log('')
 
 // iframe 里真的渲染出东西了吗（sandbox 缺 allow-same-origin 会白屏）

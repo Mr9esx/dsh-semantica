@@ -196,6 +196,48 @@ Electron 应用，这一条落在 `~/Library/Application Support/dsh-desktop/Loc
 `reduce(fn)`）验了四条，其中两条是反向用例：会加宽到 600、只写一次、
 **已经 700px 时一个字都不写**、**窄视口下不写**。
 
+### 6.2 入口按钮：从纯图标改成图标 + 文案
+
+**起因**：反馈「入口按钮加个文案吧，只有一个 icon 看不明白」。
+
+**约束先查清楚**。这个按钮注册在 DSH 的 `conversation.session.header.actions`，那一行的
+三段式布局是（抄自 `dsh-client-ui-conversation` 的 CSS）：
+
+```css
+.titleRow       { display:flex; align-items:center; min-height:32px }
+.titleCluster   { flex:1; min-width:0 }   /* 会被压缩，标题走省略号 */
+.headerActions  { flex:none }             /* 宽度由内容决定，自己不收缩 ← 我们在这里 */
+.headerUtilities{ flex:none; margin-left:20px }
+```
+
+`.headerActions` 是 `flex:none`，所以**加宽不会溢出整行** —— 但它会让左边
+`.titleCluster` 缩小，也就是**按钮每宽 1px，对话标题就少 1px**。所以「加个文案」不是
+随便加，得先知道要付多少标题宽度。
+
+**样式对齐 DSH 原生**，不自己发明。同一个 slot 里已经有带字的先例：
+`dsh-client-ui-agent-preset` 注册的 `AgentPresetLabel`。直接抄它的形状：
+
+```css
+height:22px; border-radius:6px; background:var(--dsw-alias-fill-tsp-secondary);
+font-size:12px; gap:4px; padding:0 8px; max-width:180px; overflow:hidden;
+/* 图标 14 且 opacity:.7 */
+```
+
+照抄的理由很实际：那一排是 `flex:none`、宽度随内容走，样式不统一会一眼看出来是个外来物。
+
+**文案取短**：按钮上写「知识图谱」，全称「对话知识图谱」留给 `title`，
+无障碍说明「用 Semantica 查看当前对话的知识图谱」留给 `aria-label`。
+
+**实测代价**（`scripts/visual-check.mjs` 把它塞进仿真的三段式头部里量的，不是估的）：
+
+| 视口 | 按钮 | 标题区剩余 | 标题被截断 |
+|---|---|---|---|
+| 1380px | 82×22 | 1204px | 否 |
+| 1100px | 82×22 | 924px | 否 |
+| 900px | 82×22 | 724px | 否 |
+
+原来是 26×26 的纯图标，所以代价是 **+56px**，三档视口下标题都还有充足空间。
+
 #### 一个只有真浏览器才能发现的 CSS 坑
 
 ```css

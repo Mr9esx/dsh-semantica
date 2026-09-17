@@ -61,6 +61,7 @@ window.__ModuleLoader__.load({
 
 		const zh = {
 			"action.title": "对话知识图谱",
+			"action.label": "知识图谱",
 			"action.aria": "用 Semantica 查看当前对话的知识图谱",
 			"tab.title": "知识图谱",
 			"state.working": "正在用 Semantica 抽取实体与关系…",
@@ -107,6 +108,7 @@ window.__ModuleLoader__.load({
 
 		const en = {
 			"action.title": "Conversation knowledge graph",
+			"action.label": "Knowledge graph",
 			"action.aria": "Explore this conversation's knowledge graph with Semantica",
 			"tab.title": "Knowledge graph",
 			"state.working": "Extracting entities and relations with Semantica…",
@@ -215,8 +217,18 @@ window.__ModuleLoader__.load({
 .semg-banner-x:hover{opacity:1}
 .semg-empty{display:flex;align-items:center;justify-content:center;padding:20px;text-align:center;color:var(--dsw-alias-label-secondary,#888)}
 .semg-code{margin-top:6px;padding:8px;border-radius:6px;background:var(--dsw-alias-bg-layer-1,rgba(0,0,0,.03));font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10px;line-height:1.5;white-space:pre-wrap;word-break:break-word;text-align:left}
-.semg-action{display:inline-flex;align-items:center;justify-content:center;width:26px;height:26px;border-radius:6px;border:none;background:transparent;color:var(--dsw-alias-label-secondary,#666);cursor:pointer}
-.semg-action:hover{background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.06));color:var(--dsw-alias-label-primary,#222)}
+/* 头部入口按钮。尺寸整套抄 DSH 自己在这个 slot 里的带字元素
+   （@deepseek-ai/dsh-client-ui-agent-preset 的 AgentPresetLabel）：
+   height 22 / radius 6 / fill-tsp-secondary / font-size 12 / gap 4 / 图标 14 且 opacity .7。
+   照抄是为了它坐在 .headerActions 里不像个外来物 —— 那一排是 flex:none，
+   宽度由内容决定，样式不统一就会一眼看出来。
+   注意这里能带文案的余量是有限的：.headerActions 是 flex:none，而 .titleCluster
+   是 flex:1;min-width:0 —— 也就是说这个按钮每宽 1px，标题就少 1px（标题会走省略号）。
+   所以文案取短、给 max-width，不用「对话知识图谱」那种全称（那个留给 title）。 */
+.semg-action{display:inline-flex;align-items:center;gap:4px;height:22px;max-width:180px;padding:0 8px;border-radius:6px;border:none;background:var(--dsw-alias-fill-tsp-secondary,rgba(0,0,0,.045));color:var(--dsw-alias-label-secondary,#666);font:inherit;font-size:12px;line-height:22px;white-space:nowrap;cursor:pointer;overflow:hidden}
+.semg-action:hover{background:var(--dsw-alias-interactive-bg-hover,rgba(0,0,0,.07));color:var(--dsw-alias-label-primary,#222)}
+.semg-action-icon{opacity:.7;flex:none}
+.semg-action-text{overflow:hidden;text-overflow:ellipsis}
 .semg-view{display:flex;flex-direction:column;height:100%;min-height:0}
 .semg-viewbar{display:flex;align-items:center;gap:8px;padding:7px 10px;flex:0 0 auto;font-size:12px;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12))}
 .semg-viewtitle{font-weight:600;flex:0 0 auto}
@@ -464,7 +476,8 @@ window.__ModuleLoader__.load({
 					"aria-label": T("action.aria"),
 					onClick,
 				},
-				h(IconGraph, { size: 16 }),
+				h(IconGraph, { size: 14, className: "semg-action-icon" }),
+				h("span", { className: "semg-action-text" }, T("action.label")),
 			);
 		}
 
