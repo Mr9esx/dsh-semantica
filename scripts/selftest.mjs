@@ -277,6 +277,42 @@ check(
 	JSON.stringify(variables[0]?.fn({})),
 )
 
+// 变量注册失败时的防线。
+//
+// dsh-system-prompt 的 interpolate() 遇到没注册的 `{{x}}` 会**直接抛异常**。段落里
+// 引用了会话变量，所以「段落留下、变量没留下」是最坏的组合：之后每一次组装提示词都炸。
+// 这里让 variable() 抛，断言段落一个都没留下。
+{
+	const sections2 = []
+	const ctx2 = {
+		effect(fn) {
+			fn()
+		},
+		on() {},
+		get() {
+			return undefined
+		},
+		inject(names, cb) {
+			if (names.includes('systemPrompt')) {
+				cb({
+					effect: ctx2.effect,
+					systemPrompt: {
+						variable() {
+							throw new Error('占位：注册失败')
+						},
+						section(spec) {
+							sections2.push(spec)
+							return () => {}
+						},
+					},
+				})
+			}
+		},
+	}
+	apply(ctx2, {})
+	check('变量没注册上时不留段落（否则每次提示词组装都会抛）', sections2.length === 0, `sections=${sections2.length}`)
+}
+
 const wantPaths = ['/api-semantica/status', '/api-semantica/view', '/api-semantica/analysis']
 check('三个路由都注册了', wantPaths.every((p) => routes.has(p)), [...routes.keys()].join(', '))
 

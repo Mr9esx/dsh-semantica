@@ -156,16 +156,42 @@ function apply(ctx, config) {
 	if (wantsPrompt) {
 		ctx.inject(['systemPrompt'], (pctx) => {
 			const sp = pctx.systemPrompt
-			pctx.effect(
-				() =>
-					sp.variable(SESSION_VARIABLE, (context) => context?.agent?.session?.header?.id ?? ''),
-				'semantica-graph.variable()',
-			)
-			pctx.effect(
-				() => sp.section({ name: SECTION_NAME, order: cfg.sectionOrder ?? SECTION_ORDER, text: SECTION_TEXT }),
-				'semantica-graph.section()',
-			)
-			note(ctx, 'debug', 'semantica-graph: 已注入知识图谱提示词段')
+
+			// 顺序要紧：**先注册变量，再注册引用了它的段落**。
+			//
+			// dsh-system-prompt 的 interpolate() 遇到没注册的 `{{x}}` 是**直接抛异常**
+			// （"unknown prompt variable"）。段落里写着 `{{semantica_conversation}}`，
+			// 所以只要出现「段落注册成功、变量没注册上」这种半吊子状态，之后**每一次**
+			// 组装提示词都会炸 —— 那是把用户整个会话搞挂，比没有知识图谱严重得多。
+			// 所以两步各自兜住，变量没成就不注册段落。
+			let variableReady = false
+			try {
+				pctx.effect(
+					() =>
+						sp.variable(
+							SESSION_VARIABLE,
+							// 值不能是 undefined：interpolate() 对 undefined 也会抛
+							// （"has no value for this assembly"），所以兜到空串。
+							(context) => context?.agent?.session?.header?.id ?? '',
+						),
+					'semantica-graph.variable()',
+				)
+				variableReady = true
+			} catch (err) {
+				note(ctx, 'warn', `semantica-graph: 会话变量注册失败，已跳过提示词段：${err?.message ?? err}`)
+			}
+
+			if (!variableReady) return
+			try {
+				pctx.effect(
+					() => sp.section({ name: SECTION_NAME, order: cfg.sectionOrder ?? SECTION_ORDER, text: SECTION_TEXT }),
+					'semantica-graph.section()',
+				)
+				note(ctx, 'debug', 'semantica-graph: 已注入知识图谱提示词段')
+			} catch (err) {
+				// 名字被占了（重复加载 / 热重载）之类：少一段提示词而已，别把插件拖下水
+				note(ctx, 'warn', `semantica-graph: 提示词段注册失败：${err?.message ?? err}`)
+			}
 		})
 	}
 
