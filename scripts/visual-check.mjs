@@ -49,20 +49,23 @@ const STATS = {
 // 面板现在铺满整个对话视图区，不再挤在 640px 侧边栏里，所以扫的是一组真实视图宽度：
 // 小窗口一路到 1380px 窗口下的全宽。640 那档留着 —— 面板窄到那个程度布局仍然不能散，
 // 而且它正好落在路径 chip 的换行临界点上。
-const WIDTHS = [420, 640, 780, 900, 1100, 1380]
-/** 两组按钮能排在同一行所需的最小宽度（实测：600 同行、520 换行）。 */
-const SAME_ROW_MIN = 600
+const WIDTHS = [420, 640, 780, 900, 1100, 1200, 1280, 1380]
 /**
- * 路径 chip 能和统计数字同处第一行的最小宽度。
+ * 工具栏在这么宽以上应该排成**一行**（信息 + 四个分析按钮 + 在浏览器打开）。
+ * 扫出来的：1380px 一行（工具栏 48px），1100px 还要两行（82px），门槛在中间。
+ */
+const ONE_ROW_MIN = 1280
+/**
+ * 路径 chip 能和统计数字同处一行的最小宽度。
  *
- * 这个数比 SAME_ROW_MIN 更值钱：chip 一旦换行，info 从 26px 涨到 52px，
- * 工具栏跟着从 77px 涨到 103px —— 26px 的图区高度。
+ * 这个数很值钱：chip 一旦换行，信息组从 26px 涨到 52px，整条工具栏跟着变高
+ * （一行 48px → 两行 82px），直接吃掉 34px 的图区高度。
  *
- * ⚠️ 它会跟着第一行的内容走，改第一行就得重量：
+ * ⚠️ 它会跟着工具栏里的内容走，改工具栏就得重量：
  *   700px  无「图已过期」标记（下面主循环量的就是这个）
- *   820px  有标记时（标记 12px 占 62px，把门槛推高 120px）
- * 「重新抽取」按钮搬进第一行时，这个数从 640 涨到了 700；
- * 工具栏改成卡片后内容区又窄了 38px，带标记的那个门槛从 780 涨到 820。
+ *   820px  有标记时（标记占 62px，把门槛推高 120px）
+ * 演进：「重新抽取」按钮搬进第一行时 640 → 700；工具栏改成卡片（内容区窄 38px）
+ * 之后带标记的那个从 780 → 820。
  */
 const CHIP_ONE_LINE_MIN = 700
 /**
@@ -143,6 +146,12 @@ await page.addScriptTag({ path: `${APP}/node_modules/react/umd/react.development
 await page.addScriptTag({ path: `${APP}/node_modules/react-dom/umd/react-dom.development.js` })
 await page.evaluate(() => { window.__ModuleLoader__ = { load: (d) => { window.__plugin = d } } })
 await page.addScriptTag({ content: CLIENT })
+
+/** 三个组的垂直中心，用来定位换行发生在哪一组 */
+const c3 = (r) => {
+	const c = (b) => (b == null ? null : b.t + b.h / 2)
+	return `${c(r.info)} / ${c(r.acts)} / ${c(r.util)}`
+}
 
 let failures = 0
 const check = (label, ok, extra) => {
@@ -246,6 +255,15 @@ const renderPanel = async ({ width, explorer, stats, stale = false }) =>
 				tag: rel(panel.querySelector('.semg-tag')),
 				refresh: rel([...panel.querySelectorAll('.semg-toolbar-info .semg-btn')][0]),
 				stats: [...panel.querySelectorAll('.semg-mini')].map((s) => s.textContent.trim()),
+				// 一行 = 三组的垂直中心落在同一条线上
+				oneRow: (() => {
+					const c = (b) => (b ? b.t + b.h / 2 : null)
+					const ci = c(rel(info))
+					const ca = c(rel(acts))
+					const cu = c(rel(util))
+					if (ci == null || ca == null || cu == null) return false
+					return Math.abs(ci - ca) <= 2 && Math.abs(ca - cu) <= 2
+				})(),
 				buttons: [...panel.querySelectorAll('.semg-toolbar-actions .semg-btn')].map((b) => b.textContent.trim()),
 				overlap,
 			}
@@ -482,7 +500,7 @@ console.log('── 图谱标签：iframe 不重载 / 隐藏输入框 / 卡片�
 
 for (const width of WIDTHS) {
 	const r = await renderPanel({ width, explorer: EXPLORER, stats: STATS })
-	console.log(`── ${width}px  工具栏高 ${r.toolbarH}  图区 ${r.frame ? `${r.frame.w}×${r.frame.h}` : '—'}`)
+	console.log(`── ${width}px  工具栏高 ${r.toolbarH}  图区 ${r.frame ? `${r.frame.w}×${r.frame.h}` : '—'}  ${r.oneRow ? '一行' : '多行'}`)
 	console.log(`     信息 y${r.info && r.info.t} h${r.info && r.info.h} | 分析 y${r.acts && r.acts.t} x${r.acts && r.acts.l}~${r.acts && r.acts.l + r.acts.w} | 控制 y${r.util && r.util.t} x${r.util && r.util.l}~${r.util && r.util.l + r.util.w} | chip w${r.chipW} y${r.chipT}`)
 	check('没有横向溢出', r.overflowX === 0, `溢出 ${r.overflowX}px`)
 	check('信息区与按钮组不重叠', r.overlap === false)
@@ -494,16 +512,12 @@ for (const width of WIDTHS) {
 		!!r.util && !!r.acts && r.util.t >= r.acts.t - 2,
 		`acts.t=${r.acts && r.acts.t} util.t=${r.util && r.util.t}`,
 	)
-	check(
-		'控制按钮在分析按钮右边',
-		!!r.util && !!r.acts && r.util.l > r.acts.l,
-		`acts.l=${r.acts && r.acts.l} util.l=${r.util && r.util.l}`,
-	)
-	if (width >= SAME_ROW_MIN) {
+	// 只有两组在同一行时「右边」才有意义；换行之后按 DOM 顺序排，不保证左右
+	if (r.oneRow) {
 		check(
-			'够宽时两组排在同一行',
-			Math.abs(r.util.t - r.acts.t) <= 2,
-			`acts.t=${r.acts.t} util.t=${r.util.t}`,
+			'同一行时控制按钮在分析按钮右边',
+			!!r.util && !!r.acts && r.util.l > r.acts.l,
+			`acts.l=${r.acts && r.acts.l} util.l=${r.util && r.util.l}`,
 		)
 	}
 	// 路径 chip 的行位：够宽时和统计数字同一行，不够时换到第二行。
@@ -526,11 +540,16 @@ for (const width of WIDTHS) {
 		`util右缘 ${r.util && r.util.l + r.util.w} vs 面板宽 ${r.panelW}`,
 	)
 	// 第一行只剩信息，必须在按钮行上方
+	// 合并成一行之后「信息在上、按钮在下」这个旧约定没有了：宽度不够时是 flex-wrap
+	// 按 DOM 顺序换行，三组之间只保证「按钮组不会跑到信息组上方」。
 	check(
-		'第一行（信息）在第二行（按钮）上方',
-		!!r.info && !!r.acts && r.info.t + r.info.h <= r.acts.t + 1,
-		`info底 ${r.info && r.info.t + r.info.h} vs acts顶 ${r.acts && r.acts.t}`,
+		'按钮组不会跑到信息组上方',
+		!!r.info && !!r.acts && r.acts.t >= r.info.t - 2,
+		`acts顶 ${r.acts && r.acts.t} vs info顶 ${r.info && r.info.t}`,
 	)
+	if (width >= ONE_ROW_MIN) {
+		check('够宽时整条工具栏是一行（信息 + 按钮 + 在浏览器打开）', r.oneRow, `info.c / acts.c / util.c = ${c3(r)}`)
+	}
 	// 整列必须刚好填满：16(上内边距) + 工具栏 + 16(行距) + 画布 + 16(下内边距) = 720
 	check(
 		'上内边距 + 工具栏 + 行距 + 画布 + 下内边距 = 面板高度',

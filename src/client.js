@@ -172,7 +172,7 @@ const CSS = `
 .semg-card b{display:block;font-size:17px;font-weight:600;line-height:1.3}
 .semg-card span{font-size:10px;color:var(--dsw-alias-label-secondary,#888)}
 .semg-row{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.semg-btn{display:inline-flex;align-items:center;gap:4px;height:26px;padding:0 10px;border-radius:6px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));background:transparent;color:inherit;font-size:11px;cursor:pointer;white-space:nowrap}
+.semg-btn{display:inline-flex;align-items:center;gap:4px;box-sizing:border-box;height:var(--semg-ctl-h,26px);padding:0 var(--semg-ctl-pad,10px);border-radius:var(--semg-ctl-radius,6px);border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));background:transparent;color:inherit;font-size:11px;cursor:pointer;white-space:nowrap}
 .semg-btn:hover{background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.05))}
 .semg-btn[data-primary="1"]{border-color:var(--dsw-alias-brand-primary,#4d6bfe);color:var(--dsw-alias-brand-primary,#4d6bfe)}
 .semg-btn:disabled{opacity:.45;cursor:default}
@@ -191,24 +191,31 @@ const CSS = `
 .semg-split{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12px;box-sizing:border-box;padding:16px;gap:16px}
 /* 工具栏也是一张卡片，与下面的图谱卡片同规格：1px 边框 + 8px 圆角 + 同色底。
    原来它只贴了一条 border-bottom、并且直接顶到面板边缘，跟图谱那块对不上。 */
+/* 工具栏里的控件尺寸**只在这里定义一次**：按钮、路径 chip、过期标记共用同一套
+   高度 / 内边距 / 圆角 / 间距。以前是三种高度（按钮 28px、chip 18px、标记 18px）配
+   三种内边距（10 / 6 / 7），同一行里高低不齐；而且按钮没写 box-sizing，
+   写成 height:26px 再加 1px 边框，实际是 28px。 */
+.semg-split,.semg-panel{--semg-ctl-h:26px;--semg-ctl-pad:10px;--semg-ctl-radius:6px;--semg-ctl-gap:8px}
+
 .semg-toolbar{display:flex;flex-direction:column;gap:6px;padding:10px 12px;flex:0 0 auto;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff)}
-.semg-toolbar-top{display:flex;align-items:center;justify-content:space-between;gap:8px 12px;flex-wrap:wrap}
-.semg-toolbar-info{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0;flex:0 1 auto}
-/* flex:0 0 auto 在这里是安全的：它只放几个图标按钮，宽度不会超过容器 */
-.semg-toolbar-util{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:0 0 auto;margin-left:auto}
-/* 这一行**必须**能收缩：flex-basis 取 auto 会让它按内容宽度（约 380px）撑开，
+/* **一行**：图信息 → 四个分析按钮 → 「在浏览器打开」（靠 margin-left:auto 推到最右）。
+   宽度不够时 flex-wrap 自然换行，不做专门的响应式 —— 常规窗口宽度下就是一行。
+   以前是两行（第一行只有信息，第二行才是按钮），而且两行的按钮还差 1px。 */
+.semg-toolbar-row{display:flex;align-items:center;gap:8px 12px;flex-wrap:wrap;min-width:0}
+.semg-toolbar-info{display:flex;align-items:center;gap:var(--semg-ctl-gap,8px);flex-wrap:wrap;min-width:0;flex:0 1 auto}
+/* flex:0 0 auto 在这里是安全的：它只放一个链接按钮，宽度不会超过容器 */
+.semg-toolbar-util{display:flex;align-items:center;gap:var(--semg-ctl-gap,8px);flex-wrap:wrap;flex:0 0 auto;margin-left:auto}
+/* 这一组**必须**能收缩：flex-basis 取 auto 会让它按内容宽度（约 380px）撑开，
    于是内部的 flex-wrap 永远不触发，窄面板里直接横向溢出。 */
-/* 第二行：左边四个分析按钮，右边图谱/视图控制。 */
-.semg-toolbar-bottom{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap;min-width:0}
-.semg-toolbar-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:0 1 auto;min-width:0}
+.semg-toolbar-actions{display:flex;align-items:center;gap:var(--semg-ctl-gap,8px);flex-wrap:wrap;flex:0 1 auto;min-width:0}
 .semg-mini{display:inline-flex;align-items:baseline;gap:3px;white-space:nowrap}
 .semg-mini b{font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}
 .semg-mini span{font-size:10px;color:var(--dsw-alias-label-secondary,#888)}
-.semg-tag{font-size:12px;line-height:18px;padding:0 7px;border-radius:999px;background:rgba(232,163,61,.16);color:#b57517;white-space:nowrap}
+.semg-tag{font-size:12px;box-sizing:border-box;height:var(--semg-ctl-h,26px);line-height:var(--semg-ctl-h,26px);padding:0 var(--semg-ctl-pad,10px);border-radius:999px;background:rgba(232,163,61,.16);color:#b57517;white-space:nowrap}
 /* 图文件路径。整条路径约 100 字符，工具栏放不下，所以显示的是省略形式（完整值在
    title 里，复制的也是完整值）。min-width:0 + overflow:hidden 让它能被压缩 ——
    否则它自己不收缩，会把 .semg-toolbar-info 顶出容器。 */
-.semg-path{display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:100%;padding:1px 6px;border-radius:5px;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));background:transparent;color:inherit;font:inherit;cursor:pointer;overflow:hidden}
+.semg-path{display:inline-flex;align-items:center;gap:4px;box-sizing:border-box;height:var(--semg-ctl-h,26px);min-width:0;max-width:100%;padding:0 var(--semg-ctl-pad,10px);border-radius:var(--semg-ctl-radius,6px);border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));background:transparent;color:inherit;font:inherit;cursor:pointer;overflow:hidden}
 .semg-path:hover{background:var(--dsw-alias-bg-layer-2,rgba(0,0,0,.05))}
 .semg-path code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .semg-path[data-state="copied"]{border-color:#3aa76d;color:#3aa76d}
@@ -862,10 +869,11 @@ const CSS = `
 
 					h(
 						"div",
-						{ className: "semg-toolbar-top" },
+						{ className: "semg-toolbar-row" },
 
-						// 第一行：只有基本信息。控制按钮全在第二行，所以这一行整行留给
-					// 统计数字和路径 chip（完整路径有 55 字符，之前和按钮抢宽度会换行）。
+						// 图信息这一组：图标 + 四个统计 + 过期标记 + 重新抽取 + 落盘路径。
+						// 它和下面的按钮组同处一行 —— 宽度不够时 flex-wrap 会把后面的组
+						// 挤到下一行，不需要按宽度写分支。
 						h(
 							"div",
 							{ className: "semg-toolbar-info", title: engineLine || undefined },
@@ -903,13 +911,9 @@ const CSS = `
 								? h(PathChip, { key: "path", path: stats.graphPath })
 								: null,
 						),
-					),
 
-					// 第二行：左边四个分析按钮，右边图谱/视图控制。
+					// 四个分析按钮，然后是被 margin-left:auto 推到最右的「在浏览器打开」。
 					// 两组都是「操作」，用右对齐而不是竖线分隔 —— 加线反而像两个区块。
-					h(
-						"div",
-						{ className: "semg-toolbar-bottom" },
 
 
 						// 四个分析按钮
