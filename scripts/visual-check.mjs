@@ -46,7 +46,10 @@ const STATS = {
 
 // 侧边栏实际可能的宽度区间
 // 600 单列出来：那是插件自动加宽后的真实面板宽度（better-sidebar 出厂是 483）。
-const WIDTHS = [300, 320, 420, 520, 600, 640, 720]
+// 面板现在铺满整个对话视图区，不再挤在 640px 侧边栏里，所以扫的是一组真实视图宽度：
+// 小窗口一路到 1380px 窗口下的全宽。640 那档留着 —— 面板窄到那个程度布局仍然不能散，
+// 而且它正好落在路径 chip 的换行临界点上。
+const WIDTHS = [420, 640, 780, 900, 1100, 1380]
 /** 两组按钮能排在同一行所需的最小宽度（实测：600 同行、520 换行）。 */
 const SAME_ROW_MIN = 600
 /**
@@ -124,23 +127,19 @@ const check = (label, ok, extra) => {
 console.log(`Explorer: ${EXPLORER}`)
 console.log(`截图目录: ${OUT}\n`)
 
-// 侧边栏宽度：better-sidebar 出厂值是「窗口宽度 35%」，1380px 窗口 = 483px。
-// 插件会在图谱面板展开时把它拉到 600px（只加宽，不回缩）。
-const SEED_WIDTH_NARROW = 483
-const SEED_WIDTH_WIDE = 700
-const EXPANDED_WIDTH = 640
-
-const renderPanel = async ({ width, explorer, stats, seedWidth, stale = false }) =>
+const renderPanel = async ({ width, explorer, stats, stale = false }) =>
 	page.evaluate(
-		async ({ width, explorer, stats, seedWidth, stale }) => {
+		async ({ width, explorer, stats, stale }) => {
 			const host = document.getElementById('host')
 			host.innerHTML = ''
 			const panel = document.createElement('div')
-			panel.style.cssText = `width:${width}px;height:720px;background:#fff;overflow:hidden`
+			// 容器必须模仿真实的 .viewArea：`display:flex; flex-direction:column`。
+			// 面板根元素是 `flex:1 1 auto`（不依赖父元素有确定高度），父元素不是
+			// flex 容器的话它就只有内容高度 —— 图区量出来是 0，几何检查全废。
+			panel.style.cssText = `width:${width}px;height:720px;background:#fff;overflow:hidden;display:flex;flex-direction:column`
 			panel.id = `panel-${width}`
 			host.appendChild(panel)
 
-			const widthWrites = []
 			// 头部入口按钮是通过 slots 注册的，这里把它抓出来，
 			// 好在后面单独塞进一个仿真的 DSH 头部里量布局。
 			window.__headerAction = null
@@ -148,18 +147,18 @@ const renderPanel = async ({ width, explorer, stats, seedWidth, stale = false })
 				if (n === 'react') return React
 				throw new Error(`意外的 require("${n}")`)
 			})
-			const components = {}
-			const sidebar = { registerTab: (d) => { components[d.id] = d.component; return () => {} }, openTab: () => {}, closeTab: () => {} }
+			// 面板住在 conversation.view 槽里（核心包提供），**不经过 better-sidebar**。
+			// 这里连 betterSidebar 服务都不提供 —— 面板照样要能渲染出来。
 			const ctx = {
 				get: (k) =>
-					k === 'betterSidebar' ? sidebar
-					: k === 'sessions' ? { open: () => {} }
+					k === 'sessions' ? { open: () => {} }
 					: k === 'locale' ? { getLocale: () => ({ active: 'zh-CN', locales: [], revision: 1 }) }
 					: undefined,
 				on: () => {}, effect: (fn) => fn(),
 				slots: {
 					inject: (_n, cb) => cb(),
 					register: (desc, comp) => {
+						if (desc.name === 'conversation.view') window.__panelComp = comp
 						if (desc.name === 'conversation.session.header.actions') window.__headerAction = { desc, comp }
 						return () => {}
 					},
@@ -172,20 +171,9 @@ const renderPanel = async ({ width, explorer, stats, seedWidth, stale = false })
 			})
 			mod.apply(ctx)
 			ReactDOM.createRoot(panel).render(
-				React.createElement(components['semantica:launcher'], {
-					ctx,
-					// 真 store 的形状：getSnapshot().state.width 是当前宽度，
-					// reduce(fn) 提交一个新 state。这里把 reduce 的产物记下来，
-					// 好断言插件到底有没有改宽度、改成了多少。
-					store: {
-						getPrefs: () => ({}),
-						getSnapshot: () => ({ state: { width: seedWidth } }),
-						reduce: (fn) => { widthWrites.push(fn({ width: seedWidth })) },
-						subscribe: () => () => {},
-					},
-					scope: { sessionId: 'sess-visual' }, sessionId: 'sess-visual', visible: true,
-					tab: { id: 'semantica:launcher' },
-				}),
+				// 槽渲染时给的 props：ownerProps 只有 viewRequest/openView/
+				// completeViewRequest，standardProps 里有 sessionId。我们只用 sessionId。
+				React.createElement(window.__panelComp, { sessionId: 'sess-visual' }),
 			)
 			await new Promise((res) => setTimeout(res, 2600))
 
@@ -213,7 +201,6 @@ const renderPanel = async ({ width, explorer, stats, seedWidth, stale = false })
 			const chipText = chip ? (chip.querySelector('code') || {}).textContent || '' : null
 			const chipTitle = chip ? chip.getAttribute('title') || '' : null
 			const geom = {
-				widthWrites: widthWrites.map((st) => st.width),
 				viewportW: window.innerWidth,
 				toolbarH: toolbar ? Math.round(toolbar.getBoundingClientRect().height) : 0,
 				chipW: chip ? Math.round(chip.getBoundingClientRect().width) : 0,
@@ -249,11 +236,11 @@ const renderPanel = async ({ width, explorer, stats, seedWidth, stale = false })
 
 			return { ...geom, chipText, chipTitle, chipCopied, chipLabelAfter }
 		},
-		{ width, explorer: EXPLORER, stats: STATS, seedWidth, stale },
+		{ width, explorer: EXPLORER, stats: STATS, stale },
 	)
 
 for (const width of WIDTHS) {
-	const r = await renderPanel({ width, explorer: EXPLORER, stats: STATS, seedWidth: SEED_WIDTH_NARROW })
+	const r = await renderPanel({ width, explorer: EXPLORER, stats: STATS })
 	console.log(`── ${width}px  工具栏高 ${r.toolbarH}  图区 ${r.frame ? `${r.frame.w}×${r.frame.h}` : '—'}`)
 	console.log(`     信息 y${r.info && r.info.t} h${r.info && r.info.h} | 分析 y${r.acts && r.acts.t} x${r.acts && r.acts.l}~${r.acts && r.acts.l + r.acts.w} | 控制 y${r.util && r.util.t} x${r.util && r.util.l}~${r.util && r.util.l + r.util.w} | chip w${r.chipW} y${r.chipT}`)
 	check('没有横向溢出', r.overflowX === 0, `溢出 ${r.overflowX}px`)
@@ -321,7 +308,7 @@ for (const width of WIDTHS) {
 // chip 的同行门槛从 700px 被推到 840px。这个数会随着第一行的内容变，所以必须量、不能算。
 console.log('── 「图已过期」标记推高路径 chip 的门槛')
 for (const width of [640, CHIP_ONE_LINE_MIN_STALE]) {
-	const r = await renderPanel({ width, stats: STATS, seedWidth: SEED_WIDTH_NARROW, stale: true })
+	const r = await renderPanel({ width, stats: STATS, stale: true })
 	const mini = r.mini
 	const sameLine = !!mini && Math.abs(r.chipT + r.chipH / 2 - (mini.t + mini.h / 2)) <= 2
 	check('过期标记渲染出来了', !!r.tag, `tag=${JSON.stringify(r.tag)}`)
@@ -340,37 +327,6 @@ for (const width of [640, CHIP_ONE_LINE_MIN_STALE]) {
 	}
 	console.log(`   ${width}px  工具栏高 ${r.toolbarH}  info 高 ${r.info.h}  标记 ${r.tag && r.tag.w}×${r.tag && r.tag.h}  重新抽取 ${r.refresh && r.refresh.w}px`)
 }
-console.log('')
-
-// ── 侧边栏宽度：图谱面板展开时自动加宽到 640px ──
-//
-// 出厂宽度 483px 放不下 Explorer（它自带一条约 240px 的左栏），所以插件在
-// 面板展开时把侧边栏拉到 600px。三条断言：会加宽、不反复触发、不越界。
-console.log('── 侧边栏宽度')
-const narrow = await renderPanel({ width: 520, explorer: EXPLORER, stats: STATS, seedWidth: SEED_WIDTH_NARROW })
-check(
-	`出厂宽度 ${SEED_WIDTH_NARROW}px → 加宽到 ${EXPANDED_WIDTH}px`,
-	narrow.widthWrites[0] === EXPANDED_WIDTH,
-	`写入 ${JSON.stringify(narrow.widthWrites)}`,
-)
-check('只写一次（展开期间不反复触发）', narrow.widthWrites.length === 1, `${narrow.widthWrites.length} 次`)
-
-const wide = await renderPanel({ width: 520, explorer: EXPLORER, stats: STATS, seedWidth: SEED_WIDTH_WIDE })
-check(
-	`用户已经拖到 ${SEED_WIDTH_WIDE}px 时不动它（只加宽不回缩）`,
-	wide.widthWrites.length === 0,
-	`写入 ${JSON.stringify(wide.widthWrites)}`,
-)
-
-// 视口 < 768px 时 better-sidebar 切成全屏抽屉，面板铺满窗口，改宽度没有意义
-await page.setViewportSize({ width: 700, height: 720 })
-const drawer = await renderPanel({ width: 520, explorer: EXPLORER, stats: STATS, seedWidth: SEED_WIDTH_NARROW })
-check(
-	'窄视口（抽屉模式）下不加宽',
-	drawer.widthWrites.length === 0,
-	`视口 ${drawer.viewportW}px，写入 ${JSON.stringify(drawer.widthWrites)}`,
-)
-await page.setViewportSize({ width: 1280, height: 720 })
 console.log('')
 
 // ── 头部入口按钮：图标 + 文案，且不能把标题挤坏 ──

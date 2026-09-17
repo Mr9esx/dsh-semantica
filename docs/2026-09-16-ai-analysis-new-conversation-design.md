@@ -222,6 +222,12 @@ provider / model / reasoningEffort。选模型失败不致命，只记 warn。
 
 ### 6.1 侧边栏宽度：出厂 483px 放不下 Explorer
 
+> **⚠️ 已废弃（2026-09 重构）**：面板已从 better-sidebar 的侧边栏搬到对话自己的标签栏，
+> 宽度不再是侧边栏的百分比，而是整个对话视图区（1380px 窗口下约 1380px）。
+> 下面这一节连同 §6.3 §6.4 §6.5 记录的是一段**已经结束的历史** —— 保留是因为
+> 「出厂比目标窄 157px」这个坑真实发生过，但它现在不构成问题：前提没了。
+> 新的架构见 §6.6。
+
 **起因**：试用后反馈「打开宽度现在是多少，感觉有点窄了」。
 
 **查出来的事实**（不是猜的）：
@@ -328,6 +334,9 @@ chip 点下去文案会从 `…/dsh-semantica-graph/session-c4f2f73…f4917b740.
 
 ### 6.4 自动加宽目标：600px → 640px（已定）
 
+> **⚠️ 已废弃**：`PANEL_COMFORT` / `comfortPanelWidth()` / `widenPanel()` 整套已删除。
+> 面板不再有「宽度」这个概念要管 —— 它铺满对话视图区。见 §6.6。
+
 按 §6.3 修正后的实测，路径 chip 和统计数字同处第一行的门槛是 **640px**，而插件最初把面板
 自动加宽到 **600px** —— 刚好差 40px 落在换行那一侧：
 
@@ -395,6 +404,76 @@ chip 点下去文案会从 `…/dsh-semantica-graph/session-c4f2f73…f4917b740.
 于是加了 `scripts/visual-check.mjs` —— 真 Chromium 在 300/320/420/520/640/720 六个宽度
 下量溢出、量重叠、量「工具栏 + 图 = 面板高度」，并确认 iframe 里真的渲染出了
 Explorer（跨源 + sandbox 下会不会白屏）。
+
+### 6.6 从 better-sidebar 搬到对话标签栏（2026-09 重构）
+
+**起因**：主人问「如果没有 better side，我们这个还能用吗」。
+
+查下来的答案是**很不堪**：插件装得上、宿主照跑（图数据照样生成），但界面**一个入口都没有**。
+更糟的是，会话标题旁那个「知识图谱」按钮**照常显示、点下去什么都不发生** —— 不报错、
+不提示，连 `console.warn` 都没有。因为 `bridge.open()` 老老实实返回了 `false`，而
+`GraphButton` 的 onClick 把返回值丢掉了：
+
+```js
+const onClick = useCallback(() => {
+  if (typeof open === "function") open(sessionId);   // ← 返回值没人看
+}, [open, sessionId]);
+```
+
+一个点不动的按钮比没有按钮更糟 —— 用户会以为插件坏了。
+
+**关键发现**：对话顶部那一排标签（对话 / 轨迹 / 上下文）是**核心包**提供的
+`conversation.view` 槽，`scope: session`、`kind: list`：
+
+- `@deepseek-ai/dsh-client-ui-chat` 注册「对话」：`{ id: "chat", order: 0, label: () => t("view.chat") }`
+- `@deepseek-ai/dsh-client-ui-trajectory` 注册「轨迹」：`{ id: "trajectory", order: 10 }`
+- 已装插件 `dsh-context` 注册「上下文」：`{ id: "context", order: 20, label: () => t("tab") }`
+
+也就是说**插件本来就能往那一排里加标签**，而且 `dsh-context` 已经这么干了 —— 它是个完美的
+参考实现。于是面板从 better-sidebar 的 tab 搬到了这里：
+
+```js
+ctx.slots.inject("conversation.view", () =>
+  ctx.slots.register(
+    { name: "conversation.view", id: "semantica-graph", order: 30, locale: NS,
+      label: () => T("tab.title") },
+    LauncherView,
+  ),
+);
+```
+
+**顺带把三样东西一起删了**：
+
+| 删掉 | 为什么 |
+|---|---|
+| `betterSidebar` 注入 + `registerTab` | 不再需要，插件现在零第三方依赖 |
+| `PANEL_FLOOR/NARROW/COMFORT` + `comfortPanelWidth()` + `widenPanel()` | 面板不再是侧边栏，没有「加宽」这回事 |
+| `props.ctx / store / scope / visible` | 槽只给 `sessionId`；`visible` 尤其多余 —— 切走标签会**卸载**组件 |
+
+**`visible` 消失带来的一个意外好处**：原来「收起 → 展开」要手动清 `startedFor` ref 才能让
+Explorer 自愈（它闲置约 10 分钟会自己死）。现在切走就卸载、切回来重新挂载，ref 自然是新的
+—— 那三个 effect 合并成了一个。
+
+**头部按钮怎么切标签**：核心**没有**程序化切换视图的 API。`openView` 只作为
+`conversation.view` 组件的 prop 传给视图自己，头部动作槽拿不到；标签按钮的 DOM 上也
+没有 `data-id`，只有 `role=tab` 和文字。所以只能按文字找再 `click()` —— 这不是偷懒，
+`dsh-context` 的「跳转到上下文」按钮用的就是同一招。找不到就返回 `false` 静默退出
+（空会话的 hero 态没有标签栏，那时点了本来就无处可去）。
+
+**效果**（1380px 窗口）：
+
+| | 旧（640px 侧边栏） | 新（全宽视图区） |
+|---|---|---|
+| 面板宽 | 640px | ~1380px |
+| 工具栏高 | 103px | **77px**（第一行装得下，不再换行） |
+| 图区 | 640×617 | **1380×643** |
+
+§6.5 那个「第 1 行装不下」的取舍**自动消失了**：第 1 行在 780px 以上就不再换行。
+
+**还有一个细节**：槽渲染时会给组件包一层 `<div data-slot="...">`，但它的 style 是
+`display: contents` —— 不生成盒子。所以面板根元素就是 `.viewArea`（
+`display:flex; flex-direction:column; flex:1; min-height:0`）的直接 flex item，
+`flex:1 1 auto` 就能铺满，不依赖父元素有确定高度。
 
 ### 7. digest 的结构
 

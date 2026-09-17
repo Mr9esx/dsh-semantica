@@ -2,17 +2,21 @@
 //
 // dsh-semantica-graph 的浏览器半侧。
 //
-// 两个贡献点：
-//   1. 「会话头部动作区」的图表按钮（与官方 jobs 插件同槽位，order 控制并列顺序）
-//   2. 两个 BetterSidebar tab：控制面板（进度/统计/错误）与 Explorer 界面本身
+// 两个贡献点，都注册在**核心包**的槽上，因此不依赖任何第三方插件：
+//   1. conversation.view —— 对话顶部那一排标签里的「知识图谱」
+//      （与「对话 / 轨迹 / 上下文」并列；那个槽由 dsh-client-ui-conversation 提供）
+//   2. conversation.session.header.actions —— 会话标题右侧的入口按钮，点了切到上面那个标签
 //
 // 图的界面**不在这里**。它由 semantica 自带的 Knowledge Explorer 提供，
-// 本插件只负责把它拉起来、然后内嵌进侧边栏。
+// 本插件只负责把它拉起来、然后内嵌进面板。
 // 这样功能上限就等于上游（6 个 workspace、78 个 /api 路由），而不是自绘一个子集。
 //
-// 内嵌走的是插件自己渲染的 iframe（ExplorerFrame），
-// 而不是 better-sidebar 的 'browser' tab —— 后者壳里有一条删不掉的状态行。
-// 详见 EXPLORER_IFRAME_SANDBOX 的注释。
+// 内嵌走的是插件自己渲染的 iframe（ExplorerFrame），而不是 better-sidebar 的
+// 'browser' 标签 —— 后者壳里有一条删不掉的状态行。详见 EXPLORER_IFRAME_SANDBOX。
+//
+// 曾经面板是 better-sidebar 的一个 tab。搬到这里的原因见设计文档 §6.6：
+// 没有 better-sidebar 时插件**能装上、宿主照跑，但界面一个入口都没有**，
+// 而头部按钮还会照常显示、点下去静默无反应。
 //
 // 因此客户端只依赖 react（在基座冻结表里），不需要内联任何第三方库，
 // 也就不需要构建步骤 —— 这个文件就是实际加载的产物。
@@ -29,7 +33,6 @@ window.__ModuleLoader__.load({
 		const { useState, useEffect, useRef, useCallback } = react;
 
 		/** 控制面板的 tab 类型。 */
-		const TAB_TYPE = "semantica:launcher";
 		const NS = "semantica-graph";
 
 		/**
@@ -151,8 +154,12 @@ window.__ModuleLoader__.load({
 
 		// ───────────────────────────── 样式 ─────────────────────────────
 
-		const CSS = `
-.semg-panel{display:flex;flex-direction:column;gap:12px;padding:14px;font-size:12px;line-height:1.6;height:100%;box-sizing:border-box;overflow:auto}
+		// 面板的根元素。注意 `flex:1 1 auto; min-height:0` 而不是 `height:100%`：
+// 槽的 wrapper div 是 `display:contents`（不生成盒子），所以这根元素就是
+// conversation.view 的 .viewArea 的直接 flex item，撑满它即可 —— 不依赖父元素
+// 有确定高度。.viewArea 本身是 `display:flex; flex-direction:column; flex:1; min-height:0`。
+const CSS = `
+.semg-panel{display:flex;flex-direction:column;gap:12px;padding:14px;font-size:12px;line-height:1.6;flex:1 1 auto;min-height:0;box-sizing:border-box;overflow:auto}
 .semg-head{display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px}
 /* 进行中的面板：spinner、标题、提示竖排，整块在面板里垂直+水平居中。
    text-align 是给换行的提示文案用的 —— 不写它居中只对行盒生效，
@@ -395,10 +402,7 @@ window.__ModuleLoader__.load({
 			["advice", "analyze.advice"],
 		];
 
-		// ─────────────────────── 侧边栏（better-sidebar） ───────────────────────
-
-
-		// ─────────────────── 跳到某个会话（新对话用） ───────────────────
+		// ──────────────── 跳到某个会话（AI 分析建好新对话后用） ────────────────
 
 		/**
 		 * sessions 服务句柄。走延迟注入（`ctx.inject(["sessions"], …)`）而不是
@@ -555,86 +559,24 @@ window.__ModuleLoader__.load({
 			);
 		}
 
-		// ────────────────────────── 侧边栏宽度 ──────────────────────────
-		//
-		// 图谱视图是个完整的 web app（Explorer 自己还有一条左侧栏），在
-		// better-sidebar 的出厂宽度下根本铺不开 —— 出厂值是「窗口宽度的 35%」，
-		// 1380px 的窗口就是 483px，而 Explorer 的左栏就吃掉约 240px。
-		//
-		// 这几个常量是 better-sidebar 的契约值，抄过来照原样用：
-		//   PANEL_MIN        = 280   （约束下限）
-		//   NARROW_MAX_WIDTH = 768   （低于它就是全屏抽屉模式，见 breakpoints.ts）
-		// 另外别被 state.ts 里的 PANEL_MAX = 640 骗了 —— 它只在 window 不存在的
-		// 时候当兜底；真正生效的上限是 window.innerWidth。
-		const PANEL_FLOOR = 280;
-		const PANEL_NARROW = 768;
-		/**
-		 * 我们想要的宽度：够 Explorer 铺开，又不至于把对话区挤没。
-		 *
-		 * 640 不是拍脑袋来的，是实测的临界值：路径 chip 宽约 359px，只有面板到 640px
-		 * 它才能和四个统计数字挤在同一行。600px 差 40px 落在换行那一侧 —— chip 一换行，
-		 * 工具栏从 68px 涨到 94px，图区白白少 26px。代价是对话区从 780px 减到 740px。
-		 */
-		const PANEL_COMFORT = 640;
 
 		/**
-		 * 目标宽度；窄到进抽屉模式时返回 null（那种情况面板铺满窗口，
-		 * 动 width 没有意义，反而会把持久化的值改坏）。
-		 */
-		function comfortPanelWidth() {
-			const vw =
-				typeof window !== "undefined" && Number.isFinite(window.innerWidth)
-					? window.innerWidth
-					: 0;
-			if (vw < PANEL_NARROW) return null;
-			// 镜像 better-sidebar 的 setWidth 钳制：下限贴 PANEL_MIN，上限贴视口。
-			return Math.min(Math.max(PANEL_FLOOR, vw), Math.max(PANEL_FLOOR, PANEL_COMFORT));
-		}
-
-		/**
-		 * 把侧边栏拉到能看的宽度。**只加宽，绝不回缩** —— 用户自己拖宽过就尊重他。
+		 * 知识图谱面板 —— 注册在 conversation.view 上的那个对话视图。
 		 *
-		 * 走的是 tab 组件拿到的 better-sidebar store（Sidebar.tsx 把它作为 prop
-		 * 传给每个 tab 组件），因为公开的 `ctx.betterSidebar` 服务没有宽度方法，
-		 * `OpenTabSeed` 里也没有宽度字段。`store.reduce` 会一并写
-		 * `dsh-sidebar:v1:width`，所以这个宽度对所有对话生效。
+		 * 它是**被槽渲染的**，所以 props 由槽系统给：ownerProps 是
+		 * `{ viewRequest, openView, completeViewRequest }`，standardProps 里有
+		 * `sessionId`。这里只用得到 sessionId。
 		 *
-		 * 加宽纯粹是体验优化，任何一步不成立就直接放弃 —— 绝不能因为这个把面板搞崩。
+		 * 以前这个组件是 better-sidebar 的 tab，props 是
+		 * `{ ctx, store, scope, visible, tab }` —— 那四个现在都不需要了：
+		 *   ctx     —— 回调里其实没用到（只是 dep 数组里挂着），删
+		 *   store   —— 只给「自动加宽面板」用，这个功能本身没了
+		 *   scope   —— 只为兜底取 sessionId，现在槽直接给 sessionId
+		 *   visible —— 视图被切走时直接卸载，挂载着就是可见
 		 */
-		function widenPanel(store) {
-			try {
-				if (
-					!store ||
-					typeof store.getSnapshot !== "function" ||
-					typeof store.reduce !== "function"
-				) {
-					return false;
-				}
-				const target = comfortPanelWidth();
-				if (target === null) return false;
-				const snap = store.getSnapshot();
-				const state = snap && snap.state;
-				if (!state || typeof state.width !== "number") return false;
-				if (state.width >= target) return false;
-				const before = state.width;
-				store.reduce((prev) => ({ ...prev, width: target }));
-				console.info(
-					"[semantica-graph] 侧边栏 " + before + "px → " + target + "px（图谱视图需要更宽）",
-				);
-				return true;
-			} catch (e) {
-				console.warn("[semantica-graph] 加宽侧边栏失败", e);
-				return false;
-			}
-		}
-
 		function LauncherView(props) {
 			ensureStyles();
-			const ctx = props.ctx;
-			const store = props.store;
-			const visible = props.visible !== false;
-			const sessionId =
-				props.sessionId || (props.scope && props.scope.sessionId) || null;
+			const sessionId = props.sessionId || null;
 
 			const [phase, setPhase] = useState("idle"); // idle | working | ready | error
 			const [stats, setStats] = useState(null);
@@ -645,9 +587,6 @@ window.__ModuleLoader__.load({
 			const [busyKind, setBusyKind] = useState(null);
 			const [analysis, setAnalysis] = useState(null);
 			const startedFor = useRef(null);
-			// 每次「收起 → 展开」只检查一次宽度。收起时重置，所以下次打开会再看一眼；
-			// 展开期间不重复触发，用户拖到哪儿就是哪儿，不会跟他抢。
-			const widthChecked = useRef(false);
 
 			const run = useCallback(
 				async (refresh) => {
@@ -683,44 +622,27 @@ window.__ModuleLoader__.load({
 						setPhase("error");
 					}
 				},
-				[ctx, sessionId],
+				[sessionId],
 			);
 
-			// 面板可见时才干活（隐藏时不浪费 CPU），每个会话只自动跑一次
-			// 图谱面板一展开，就把侧边栏拉到一个能看的宽度。放在这里而不是启动流程里，
-			// 是因为「打开图谱」既可能是点标题旁的按钮，也可能是切回这个 tab ——
-			// 两者都会让 visible 变 true，而用户要的是「看到图的时候宽度是够的」。
+			// 挂载后自动跑一次（已经跑过同一个会话就不再跑）。
+			//
+			// 以前这里有三个 effect，围着 better-sidebar 的 `visible`（收起时组件仍在，
+			// 只是不可见）和「打开时把面板加宽到 640px」打转。现在面板是对话视图：
+			// 切走时**直接卸载**、切回来重新挂载，所以
+			//   「可见」≡「挂载」（不需要 visible 判断）
+			//   「收起 → 展开重来一次」≡「卸载 → 挂载」（不需要手动清 startedFor）
+			//   「加宽面板」（不需要 —— 视图区本来就是整个对话区）
+			//
+			// 那个「重来一次」仍然是必要的：Semantica 的 Explorer 闲置约 10 分钟会自己死，
+			// 重挂时重新 prepare 会让宿主发现 worker 没了、重拉一个，拿到新端口 → url 变了
+			// → iframe 重挂，自愈。不会闪：渲染里 `phase === "working" && !url` 才显示
+			// 加载态，已有 url 时旧的图留在原地。
 			useEffect(() => {
-				if (!visible) {
-					widthChecked.current = false;
-					return;
-				}
-				if (widthChecked.current) return;
-				widthChecked.current = true;
-				widenPanel(store);
-			}, [visible, store]);
-
-			useEffect(() => {
-				if (!visible) return;
 				if (startedFor.current === sessionId) return;
 				startedFor.current = sessionId;
 				run(false);
-				return;
-			}, [visible, sessionId, run]);
-
-			// 收起时清掉「这个会话已经 prepare 过」的标记，下次展开重来一次。
-			//
-			// 这不是多余的一次 IPC：Semantica 的 Explorer 闲置约 10 分钟会自己死掉，
-			// 那时面板里的 iframe 就一直是一张连不上的页面。重新 prepare 会让宿主
-			// 发现 worker 没了、重拉一个，拿到新端口 → url 变了 → iframe 重挂，自愈。
-			//
-			// 不会闪：渲染里 `phase === "working" && !url` 才显示加载态，已经有 url
-			// 时旧的图留在原地（见 LauncherView 的 return）。
-			//
-			// 以前这件事靠工具栏那个「刷新」按钮，按钮删了，改成本地自动做。
-			useEffect(() => {
-				if (!visible) startedFor.current = null;
-			}, [visible]);
+			}, [sessionId, run]);
 
 			// — 开子会话让 AI 分析 —
 			//
@@ -1034,13 +956,13 @@ window.__ModuleLoader__.load({
 		 * 加载不起来（不是降级，是整个条目 apply 失败）。
 		 *
 		 * 这里需要的两个：
-		 *   slots  —— ctx.slots.inject / register，向会话头部动作区注册按钮
+		 *   slots  —— ctx.slots.inject / register，注册对话视图 tab 与头部按钮
 		 *   locale —— 取当前语言决定用中文还是英文字典。注意快照上的字段是
 		 *             **active**（不是 language/locale），详见下面 rebind 的注释
 		 *
-		 * 注：betterSidebar 刻意**不写进来**。它是可选且可能晚挂载的服务，
-		 * 所以走 ctx.inject(["betterSidebar"], cb) 延迟注入 + ctx.get() 安全读取，
-		 * 缺席时不阻塞插件激活。
+		 * 注：**没有 betterSidebar**。面板住在对话自己的 tab 栏里
+		 * （conversation.view 槽，核心包提供），所以这个插件不依赖任何
+		 * 第三方侧边栏插件。
 		 */
 		const inject = ["slots", "locale"];
 
@@ -1092,75 +1014,82 @@ window.__ModuleLoader__.load({
 			rebind();
 			ctx.on("locale/change", rebind);
 
-			// —— 侧边栏服务桥：betterSidebar 可选且可能晚挂载 ——
-			const bridge = {
-				sidebar: null,
-				open(sessionId) {
-					const sb = bridge.sidebar;
-					if (!sb || typeof sb.openTab !== "function") return false;
-					try {
-						// 带 path 作为「内容 seed」——better-sidebar 对 content open
-						// 会自动展开承载它的面板，而纯 type open 不会。
-						// path 只是个不透明标记，tab 组件不读它。
-						sb.openTab(
-							{ type: TAB_TYPE, title: T("tab.title"), path: `semantica:${sessionId}` },
-							{ sessionId },
-						);
-						return true;
-					} catch (err) {
-						console.warn("[semantica-graph] openTab 失败", err);
-						return false;
-					}
-				},
-			};
+			// —— 视图注册 ——
+			//
+			// 面板挂在**对话自己的 tab 栏**里（对话 / 轨迹 / 上下文 / 知识图谱），由核心包
+			// dsh-client-ui-conversation 提供的 conversation.view 这个 list 槽承载：
+			// client-ui-chat 用它注册「对话」(order 0)、client-ui-trajectory 注册「轨迹」
+			// (order 10)，已装插件 dsh-context 注册「上下文」(order 20)。我们排 30。
+			//
+			// 走这条路之后**完全不需要 better-sidebar**：面板住在对话视图区（.viewArea
+			// 是 flex:1 的整个对话区），不再挤在 640px 的侧边栏里，所以那套「打开时自动
+			// 把面板加宽到 640px」的逻辑也一并删了 —— 前提消失了。
+			const VIEW_ID = "semantica-graph";
 
-			// 1) 头部动作按钮
+			/**
+			 * 把对话切到本插件的视图（给头部按钮用）。
+			 *
+			 * 核心**没有**程序化切换视图的 API：`openView` 只作为 conversation.view 组件的
+			 * prop 传给视图自己，头部动作槽拿不到；tab 按钮的 DOM 上也没有 data-id，只有
+			 * role=tab 和文字。所以只能按文字找那个按钮再 click。
+			 *
+			 * 这不是我偷懒 —— 已装插件 dsh-context 的「跳转到上下文」按钮用的就是同一招
+			 * （它的 activateContextTab 同样是 querySelectorAll('button[role="tab"]')
+			 * 按 textContent 匹配）。生态里没有更干净的入口。
+			 *
+			 * 找不到就返回 false：空会话的 hero 态没有 tab 栏，点了本来就无处可去。
+			 */
+			function activateViewTab(label) {
+				const tabs = document.querySelectorAll('[role="tablist"] [role="tab"]');
+				for (const tab of tabs) {
+					if (tab.textContent.trim() !== label) continue;
+					if (tab.getAttribute("aria-selected") !== "true") tab.click();
+					return true;
+				}
+				return false;
+			}
+
+			// 1) 对话视图 tab —— 本插件的主界面
+			ctx.slots.inject("conversation.view", () =>
+				ctx.slots.register(
+					{
+						name: "conversation.view",
+						id: VIEW_ID,
+						order: 30,
+						locale: NS,
+						// thunk：resolveSlotLabel 每次投影都重新求值，所以切语言时
+						// tab 文字跟着变（T 读的是可变 dict）。
+						label: () => T("tab.title"),
+					},
+					LauncherView,
+				),
+			);
+
+			// 2) 头部动作按钮：切到上面那个 tab
+			//
+			// 位置在会话标题右侧，保留它是因为「点标题旁的图谱按钮」是主人熟悉的入口，
+			// 也写在 README 里；它现在不再是「打开侧边栏」而是「切到知识图谱 tab」。
 			ctx.slots.inject("conversation.session.header.actions", () =>
 				ctx.slots.register(
 					{
 						name: "conversation.session.header.actions",
-						id: "semantica-graph",
+						id: VIEW_ID,
 						order: 30,
 						locale: NS,
 						inject: () => ({
-							openPanel: (sessionId) => bridge.open(sessionId),
+							openPanel: () => activateViewTab(T("tab.title")),
 						}),
 					},
 					GraphButton,
 				),
 			);
 
-			// 2) sessions（只用来在新对话建好后跳过去）
+			// 3) sessions（只用来在新对话建好后跳过去）
 			//
-			// 和 betterSidebar 一样走延迟注入：它是可选服务，缺席时不应该拦下
-			// 整个插件。拿不到就只是不自动跳转。
+			// 延迟注入：它是可选服务，缺席时不应该拦下整个插件。拿不到就只是不自动跳转。
 			ctx.inject(["sessions"], (sctx) => {
 				const svc = sctx.get("sessions");
 				if (svc && typeof svc.open === "function") sessionsSvc = svc;
-			});
-
-			// 3) 控制面板 tab
-			ctx.inject(["betterSidebar"], (sctx) => {
-				// 用 get() 而不是 sctx.betterSidebar —— 后者是服务属性访问，
-				// 正是「cannot get property "x" without inject」的触发方式。
-				// 回调只在服务就绪时执行，所以这里必然能取到。
-				const sidebar = sctx.get("betterSidebar");
-				if (!sidebar || typeof sidebar.registerTab !== "function") return;
-				bridge.sidebar = sidebar;
-				ctx.effect(() => {
-					const disposeLauncher = sidebar.registerTab({
-						id: TAB_TYPE,
-						title: () => T("tab.title"),
-						icon: (size) => h(IconGraph, { size: size || 16 }),
-						order: 60,
-						single: true,
-						component: LauncherView,
-					});
-					return () => {
-						bridge.sidebar = null;
-						disposeLauncher();
-					};
-				}, "semantica-graph: sidebar tab");
 			});
 		}
 
