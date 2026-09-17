@@ -5,7 +5,7 @@
 
 上游 `semantica.mcp_server` 的存储假设是「一台机器一张图」：一个 `SEMANTICA_KG_PATH`，
 所有会话的写入都落进同一个文件。于是两个会话写同一个 id 时会互相覆盖 —— 真实案例：
-`session-d1648c08` 先写 `guangzhou`（type=Location，带 user_city），`session-d7c9295a`
+`session-11111111` 先写 `guangzhou`（type=Location，带 user_city），`session-22222222`
 之后也写 `guangzhou`（type=City），而 semantica 的 `add_entity` 是**整套 metadata 替换**，
 前一个会话的字段就没了 —— 前一个会话的「本对话」视图也跟着少一个节点（它还导致过一条
 悬挂边：边还在、端点没了）。

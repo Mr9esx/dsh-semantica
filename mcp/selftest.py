@@ -3,8 +3,8 @@
 
 重点复现真实事故而不是只测 happy path：
 
-  session-d1648c08 先写 `guangzhou`（type=Location + user_city），
-  session-d7c9295a 之后也写 `guangzhou`（type=City）。
+  session-11111111 先写 `guangzhou`（type=Location + user_city），
+  session-22222222 之后也写 `guangzhou`（type=City）。
 
 上游的 add_entity 是整套 metadata 替换，所以合并图里只剩后一个 —— 但**两个会话各自的
 文件里必须各自保留自己写的那份**，这正是 C 要买到的东西。
@@ -42,8 +42,10 @@ except ImportError:  # pragma: no cover
     )
     raise SystemExit(2)
 
-CONV_A = "session-d1648c08-61b2-4b1b-80ff-8ac31ac8944d"
-CONV_B = "session-d7c9295a-9a19-42cc-a11d-468209728143"
+# 两个代表性的会话 id（形状与真的一致，但都是假的 —— 这是公开仓库，不放用户的真实会话 id；
+# 归属路由只关心「两个不同的字符串」，不关心它长什么样）
+CONV_A = "session-11111111-1111-4111-8111-111111111111"
+CONV_B = "session-22222222-2222-4222-8222-222222222222"
 
 failures: list[str] = []
 checks = 0
