@@ -580,6 +580,9 @@ def build_context_graph(payload):
     噪声过滤全部复用同一套函数，两个命令的结果应当是一致的。
     """
     from semantica.context.context_graph import ContextGraph
+    from semantica.kg.graph_analyzer import CentralityCalculator
+    from semantica.kg.community_detector import CommunityDetector
+    from semantica.kg.connectivity_analyzer import ConnectivityAnalyzer
 
     out_path = payload.get("outPath")
     if not out_path:
@@ -594,6 +597,7 @@ def build_context_graph(payload):
     t0 = time.time()
     timing = {"ner": 0.0, "relation": 0.0}
 
+    _t_nodes = time.time()
     nodes = {}          # id -> {id, type, properties}
     edges = []
     seen_edge = set()
@@ -697,93 +701,43 @@ def build_context_graph(payload):
         if tc.get("turn") is not None:
             edge(f"turn:{tc.get('turn')}", cid, "contains")
 
-    # ── 1.5 决策层：对话里结构化的「选择」 ──────────────────────────────────
+    # ── 1.5 决策层：交给 semantica 原生的决策模型 ──────────────────────────
     #
-    # Explorer 的 Decisions 区（`explorer/routes/decisions.py`）只认
-    # **type == "decision"** 的节点，并从 properties 里读这几个字段：
-    #   category / scenario / reasoning / outcome / confidence / timestamp
-    # 类型对不上、或字段名不对，那个区就是空的。实测：只放一个 decision 节点
-    # 进去，`/api/decisions` 立刻返回完整的 7 个字段。
+    # 接口选择、实测耗时、以及不调 get_decision_insights 的逐字段依据，
+    # 都记在 docs/decisions-and-analysis.md。
     #
-    # 数据来自对话里的提问工具（AskUserQuestion）——它的事件同时带
-    # 「问了什么 + 每个选项什么意思」和「用户最后选了什么」，是对话中**唯一**
-    # 结构化的决策记录。别的决策都埋在自然语言里，抽出来不可靠，不做。
-    decisions_n = 0
-    decided = []          # [(决策原始记录, 节点 id)]，按时间顺序，用来串出边
+    # 【为什么不再手搓 decision 节点】
+    # 这里原来是自己造 `type: "decision"` 节点，再照抄 Explorer 的
+    # `explorer/routes/decisions.py` 读的那几个字段（category / scenario /
+    # reasoning / outcome / confidence / timestamp）。能work，但代价是：
+    #   · 字段名对不上那个区就**静默变空** —— 我们当初是靠逆向那份路由才知道
+    #     该写什么字段的，这种耦合不该存在；
+    #   · 拿不到 semantica 自己的决策生命周期。因果链 / 影响面 / 先例检索 /
+    #     合规规则 / PROV-O 导出，全部建立在它内部的决策索引上，手搓的节点
+    #     进不去那套索引。
+    # 上游 README 的 Decision Intelligence 一节写得很直白：
+    #     "a decision is not a log line. It is a first-class graph node."
+    # 而 `Decision` 的字段和 Explorer 读的字段**完全一致** —— Explorer 的
+    # schemas.py 里那个 timestamp 校验器的注释就是
+    #     "Accept the epoch floats ContextGraph.record_decision() writes"
+    # 所以走原生接口是「按构造对齐」，不需要再逆向任何人。
+    #
+    # 【数据来源不变，仍是提问工具】
+    # 只有对话里的提问工具（AskUserQuestion）同时带「问了什么 + 每个选项什么
+    # 意思」和「用户最终选了什么」，是对话中**唯一**结构化的选择记录。
+    # AI 自己做的决策埋在自然语言和思考过程里、没有结构，事后反推不可靠 ——
+    # 要拿到那种决策得让 agent 在做的当下主动声明（上游推荐的 MCP 路线，
+    # 见本仓库 docs/mcp.md），这是两件互补的事，不是同一件事。
+    #
+    # 节点创建挪到下面的组装阶段：record_decision 必须在 graph 实例上调用。
+    decided = []          # 决策原始记录，按时间顺序；组装时逐个 record_decision
     for dec in decisions:
-        outcome = str(dec.get("outcome") or "").strip()
-        if not outcome:
+        # 没作答的提问不产生决策（用户在提问工具里跳过/取消了）。
+        if not str(dec.get("outcome") or "").strip():
             continue
-        did = f"dec:{dec.get('id')}"
-        node(did, "decision", {
-            # 显示名就是用户的选择本身，一眼能看出这条决策的结论。
-            "label": outcome[:120],
-            "kind": "decision",
-            "category": str(dec.get("category") or ""),
-            "scenario": str(dec.get("scenario") or ""),
-            # 选中项自己的 description ＝ 为什么这么选。Explorer 的决策详情
-            # 就是拿这个当「推理依据」展示的。
-            "reasoning": str(dec.get("reasoning") or ""),
-            "outcome": outcome,
-            # 用户明确做了选择，不存在 NER 那种不确定性，所以是 1.0。
-            "confidence": 1.0,
-            "timestamp": _iso_local(dec.get("time")),
-            # 被放弃的选项也留下来：决策记录比普通节点多的价值就在于
-            # 「当时还有哪些别的路可走」。
-            "alternatives": dec.get("alternatives") or [],
-            # selected = 点了现成选项；custom = 自己打字，那是更明确的表态。
-            "choiceKind": dec.get("kind"),
-            "questionId": dec.get("questionId"),
-            "content": outcome,
-            **time_of(dec.get("time")),
-        })
-        if dec.get("turn") is not None:
-            edge(f"turn:{dec.get('turn')}", did, "contains", props={"kind": "decision"})
-        decided.append((dec, did))
-        decisions_n += 1
+        decided.append(dec)
 
-    # 决策的**出边** —— 没有它 Explorer 的因果链永远是空的。
-    #
-    # `ContextGraph.get_neighbors` 只走 `self._adjacency[当前节点]`，也就是**出边**：
-    #     outgoing_edges = self._adjacency.get(current_id, [])
-    # 而决策节点天然只有入边（turn → dec，谁提出了这个问题），
-    # 于是 `/api/decisions/{id}/chain` 实测返回 `{"chain": []}`。
-    #
-    # 这一点为什么是要命的：Explorer 的决策详情面板里**唯一的实质内容就是那张
-    # 标题为 "Causal Chain" 的卡片**。翻它的 bundle（DecisionWorkspace）可以看到
-    # 详情只渲染四样：decision_id、outcome 徽章、category 药丸，再加这张卡片 ——
-    # `reasoning` / `scenario` / `confidence` 各出现 **0 次**，写了也不会显示。
-    # 卡片一空，整页就剩一个长 id 和两个小标签，用户看到的就是"点进去空白"。
-    #
-    # 所以这里必须保证**任何一条决策都有出边**，包括只有一个提问的短会话。
-    #
-    # 补两类：
-    #   decided_at     这条决策来自哪次提问 —— 提问工具节点，**必然存在**且出边为 0，
-    #                  它一个人就能保证链非空（长度 1）
-    #   next_decision  时间上的下一条决策，串成一条决策链
-    #
-    # 连什么**不能**连，也是量出来的 —— 各类节点的平均出边数：
-    #
-    #     turn      128.6（最大 517）   ← 一进 turn 就扇出到整轮消息+工具，再经实体炸到全图
-    #     entity      1.1
-    #     message     0.8
-    #     tool        0.0               ← 安全
-    #
-    # 最初加的是 `dec --led_to--> turn:N+1`（决策的后果），链直接从 0 涨到 **412 个**。
-    # 而前端是 `t.map(...)` 直接渲染、没有任何截断，412 步就是一堵墙。
-    # 换成 tool 和 decision（都几乎无扇出）之后，链长落在 1~5 步 —— 恰好是「链」该有的长度。
-    #
-    # `next_decision` 是**时序相邻**，不是证明出来的因果：隔了十轮的决策之间
-    # 未必有因果关系。这里刻意用一个自解释的边名，免得读图的人误以为
-    # 是推理出来的依赖。真实因果需要别的证据，这个图里没有。
-    for i, (dec, did) in enumerate(decided):
-        # 提问工具节点 —— `toolCalls` 里那条 ask_user_question 调用，
-        # 它的 title 就是问题的可读标题，作为链的第一步正合适。
-        call_id = dec.get("callId")
-        if call_id:
-            edge(did, f"tool:{call_id}", "decided_at", props={"kind": "question"})
-        if i + 1 < len(decided):
-            edge(did, decided[i + 1][1], "next_decision", props={"kind": "decision-chain"})
+    timing["skeleton"] = time.time() - _t_nodes
 
     # ── 2. 语义层：逐段抽实体与关系 ────────────────────────────────────────
     ent_ids = {}        # 归一化名 -> 节点 id
@@ -1002,14 +956,275 @@ def build_context_graph(payload):
             if iso_until:
                 props["valid_until"] = iso_until
 
+    timing["semantics"] = time.time() - _t_nodes - timing["skeleton"]
+
     # 交给 Explorer 之前把保留字符清掉 —— 不清的话它的图谱视图会直接崩，
     # 原因见 _RESERVED_ID_CHARS 上面的注释。
     nodes, edges, renamed_ids = _sanitize_ids(nodes, edges)
 
-    graph = ContextGraph()
-    added_n = graph.add_nodes(list(nodes.values()))
-    added_e = graph.add_edges(edges)
+    # advanced_analytics=True 才会建图分析用的索引 —— 上游 README 的
+    # Context Graphs 一节就是这么建的（`ContextGraph(advanced_analytics=True)`）。
+    _t = time.time()
+    graph = ContextGraph(advanced_analytics=True)
+    graph.add_nodes(list(nodes.values()))
+    graph.add_edges(edges)
+    timing["graph"] = time.time() - _t
+
+    # ── 决策层：semantica 原生的 record_decision ────────────────────────────
+    # 为什么不用手搓节点、以及为什么数据源仍是提问工具，见上面 1.5 那段。
+    # 决策 → 实体的关联（`involves` 边）。
+    #
+    # 为什么要做：`record_decision` 的 `entities=` 参数会让 semantica 建
+    # `decision --involves--> entity` 边（实测）。不传的话，决策节点在整个图里
+    # **只连着自己那个 category**，而 Explorer 的决策详情面板里唯一有实质内容的
+    # 卡片就是 Causal Chain（它走 get_neighbors，只跟出边）—— 少一类出边，
+    # 那个面板就更空。这不是锦上添花，是把已有的信息接上。
+    #
+    # 匹配方式刻意用「实体名**字面出现**在决策文本里」，而不是语义相似度：
+    # 提问文本里真的写了这个词，这是一条**事实**；语义相似是猜，猜错会污染图。
+    # 决策文本 = 问题标题 + 问题正文 + 每个选项的文字 + 用户选的答案，
+    # 因为用户的表态正是针对这些字。
+    ent_by_label = {}
+    for nid, nd in nodes.items():
+        if nd.get("type") != "entity":
+            continue
+        label = str((nd.get("properties") or {}).get("label") or "").strip().lower()
+        # 太短的名字（单字/单字母）字面匹配会误伤，跳过
+        if len(label) >= 2:
+            ent_by_label.setdefault(label, nid)
+
+    def _decision_entities(dec):
+        parts = [
+            str(dec.get("category") or ""),
+            str(dec.get("scenario") or ""),
+            str(dec.get("outcome") or ""),
+            str(dec.get("reasoning") or ""),
+        ]
+        for opt in dec.get("alternatives") or []:
+            parts.append(str(opt))
+        hay = "\n".join(parts).lower()
+        if not hay:
+            return []
+        hits = [(hay.index(label), nid) for label, nid in ent_by_label.items() if label in hay]
+        # 按**在文本里出现的位置**排序再限量，而不是随便截断 —— 越靠前出现的
+        # 越是这条决策真正在谈的东西。限量是必须的：Explorer 的因果链走
+        # get_neighbors(5 跳)，hop-1 每多一个实体，hop-2 会顺着实体的
+        # mentions/related_to 继续炸开。实测不限量时一条决策的链有 **124 步**，
+        # 而前端是 t.map 直接渲染、没有任何截断 —— 那等于把「一堵墙」从
+        # 「点进去空白」的另一个极端换过来。5 个实体足以表达「这条决策在谈什么」。
+        hits.sort()
+        return [nid for _, nid in hits[:5]]
+
+    _t = time.time()
+    decisions_n = 0
+    decisions_failed = 0
+    decided_placeholder = 0
+    decisions_error = None
+    decided_ids = []
+    for dec in decided:
+        outcome = str(dec.get("outcome") or "").strip()
+        # record_decision 对空 category / scenario / reasoning 会直接抛
+        # ValueError（实测："Category must be a non-empty string"）。
+        # 而提问工具里这几个字段**本来就可能空**：category 是问题的 header，
+        # 用户完全可以不填；reasoning 是选中项的 description，自由输入时压根没有。
+        # 所以补占位符而不是丢掉这条决策 —— 占位符写啥要让读图的人一眼看出
+        # 是「原始数据里没有」，而不是我们编了一个理由。
+        category = str(dec.get("category") or "").strip()
+        scenario = str(dec.get("scenario") or "").strip()
+        reasoning = str(dec.get("reasoning") or "").strip()
+        if not (category and scenario and reasoning):
+            decided_placeholder += 1
+        category = category or "未分类"
+        scenario = scenario or "（提问未记录标题）"
+        reasoning = reasoning or "（原始记录里没有说明：用户直接输入的答案，或选项没有描述）"
+        try:
+            did = graph.record_decision(
+                category=category,
+                scenario=scenario,
+                reasoning=reasoning,
+                outcome=outcome[:120],
+                # 用户点了选项或自己打字，不存在 NER 那种不确定性。
+                confidence=1.0,
+                # 这个字段上游用来区分「谁做的决策」。这一层记的是用户确认过的
+                # 选择，所以是 user —— 不是 ai。AI 自己的决策要另走一条路
+                # （agent 主动声明），不能混进来冒充。
+                decision_maker="user",
+                # 见上面 _decision_entities 的说明：字面出现才算，不猜
+                entities=_decision_entities(dec),
+                metadata={
+                    # 被放弃的选项：决策记录比普通节点多的价值就在于
+                    # 「当时还有哪些别的路可走」。
+                    "alternatives": dec.get("alternatives") or [],
+                    "choiceKind": dec.get("kind"),
+                    "questionId": dec.get("questionId"),
+                    "turn": dec.get("turn"),
+                },
+            )
+        except Exception as exc:
+            # 单个决策记不进去不该拖垮整张图：决策是附加层，没有它对话骨架和
+            # 实体层依然完整。但这个失败必须被数出来、原因也要带上，不能静默吞。
+            decisions_failed += 1
+            decisions_error = f"{type(exc).__name__}: {exc}"
+            continue
+        decided_ids.append((dec, did))
+        decisions_n += 1
+
+        # 出边是**必须**的 —— Explorer 的决策详情面板里唯一有实质内容的卡片就是
+        # "Causal Chain"，而它走 get_neighbors，只跟出边（实测源码：
+        # `outgoing_edges = self._adjacency.get(current_id, [])`）。
+        # 决策天然只有入边（turn → dec），链会直接是空的，整页只剩一个长 id。
+        turn_id = f"turn:{dec.get('turn')}"
+        if dec.get("turn") is not None and turn_id in nodes:
+            graph.add_edge(turn_id, did, edge_type="contains", kind="decision")
+        call_id = dec.get("callId")
+        if call_id and f"tool:{call_id}" in nodes:
+            # 提问工具节点：它的标题就是问题的可读标题，作为链的第一步正合适，
+            # 而且它**必然存在**，一个节点就能保证链非空（长度 1）。
+            graph.add_edge(did, f"tool:{call_id}", edge_type="decided_at", kind="question")
+
+    timing["decisions"] = time.time() - _t
+
+    # ── 因果链：用原生的 add_causal_relationship ────────────────────────────
+    # 取代我们原来那个 `next_decision` 时序边。关系类型只允许
+    # CAUSED / INFLUENCED / PRECEDENT_FOR 三种，这里选 INFLUENCED 是有依据的：
+    # 同一会话里，前一条决策就在后一条决策的上下文里（agent 的上下文窗口包含
+    # 整段会话），所以「影响了」是可断言的；而 CAUSED 需要真正的因果证据，
+    # 这个图里没有，不能写。
+    causal_failed = 0
+    for i in range(len(decided_ids) - 1):
+        try:
+            graph.add_causal_relationship(
+                decided_ids[i][1], decided_ids[i + 1][1], relationship_type="INFLUENCED"
+            )
+        except Exception:
+            causal_failed += 1
+
+    # ── 图分析：中心性与社区，结果写回节点属性 ──────────────────────────────
+    # 上游把它归在 kg 模块（semantica 仓库的 docs/choose-your-module.md：
+    # 「Run graph algorithms (centrality, communities, paths)」→
+    # GraphAnalyzer / CentralityCalculator）。跑出来的值直接写进节点属性，
+    # Explorer 的节点详情面板就能看到，不需要我们改前端。
+    _t = time.time()
+    analysis_error = None
+    centrality_error = None
+    centrality_n = 0
+    community_n = 0
+    connectivity = {}
+    try:
+        cc = CentralityCalculator()
+        centrality = {}
+        for label, fn in (
+            ("degreeCentrality", cc.calculate_degree_centrality),
+            ("eigenvectorCentrality", cc.calculate_eigenvector_centrality),
+            ("closenessCentrality", cc.calculate_closeness_centrality),
+        ):
+            try:
+                got = fn(graph) or {}
+                centrality[label] = got.get("centrality", got)
+            except Exception as exc:
+                centrality_error = f"{label}: {type(exc).__name__}: {exc}"
+        # 刻意不算 betweenness：实测 4149 个节点要 18.3s，而这张图的用处是
+        # 一眼看出「哪些实体是枢纽」，degree / eigenvector 就够了（各 0.1s）。
+        assign = (CommunityDetector().detect_communities(graph) or {}).get(
+            "node_assignments"
+        ) or {}
+        for nid in nodes:
+            attrs = {}
+            for label, values in centrality.items():
+                if nid in values:
+                    attrs[label] = round(float(values[nid]), 6)
+            if nid in assign:
+                attrs["community"] = int(assign[nid])
+            if attrs:
+                graph.add_node_attribute(nid, attrs)
+        centrality_n = len(centrality)
+        community_n = len(set(assign.values()))
+        # 连通分量：这是我们唯一**必须**从 semantica 拿的分析项 ——
+        # 上面那些中心性/社区我们都能直接调对应计算器得到，但连通性只有
+        # `get_decision_insights()` 的 advanced_analytics 里才有。
+        # 与其为它跑那个 23.6 秒的整合调用（它会顺带算 4140×128 维 node2vec
+        # 嵌入，而导出根本用不上那些向量），不如直接调 ConnectivityAnalyzer。
+        try:
+            conn = ConnectivityAnalyzer().analyze_connectivity(graph) or {}
+            components = conn.get("components") or []
+            component_n = len(components)
+            largest = max((len(c) for c in components), default=0)
+            # 把「这个节点属于哪个连通分量」写到节点上，孤岛一眼可见
+            for idx, comp in enumerate(components):
+                for nid in comp or []:
+                    if nid in nodes:
+                        graph.add_node_attribute(nid, {"component": idx, "componentSize": len(comp)})
+            connectivity = {
+                "components": component_n,
+                "largest": largest,
+                "isolated": sum(1 for c in components if len(c) == 1),
+            }
+        except Exception as exc:
+            connectivity = {"error": f"{type(exc).__name__}: {exc}"}
+    except Exception as exc:
+        # 分析是附加层，失败不该让整张图作废 —— 但要如实报出来。
+        analysis_error = f"{type(exc).__name__}: {exc}"
+
+    timing["analysis"] = time.time() - _t
+
+    # ── 决策影响面：analyze_decision_impact 写回决策节点 ────────────────────
+    # 上游决策智能的一部分（README 的 Decision Intelligence 一节）。
+    impacted_n = 0
+    impact_error = None
+    _t_impact = time.time()
+    for _dec, did in decided_ids:
+        try:
+            direct = len((graph.analyze_decision_impact(did, include_indirect=False) or {}).get("direct_influence") or [])
+        except Exception as exc:
+            impact_error = f"{type(exc).__name__}: {exc}"
+            break
+        if direct:
+            graph.add_node_attribute(did, {"impactedDecisions": direct})
+            impacted_n += 1
+    timing["impact"] = time.time() - _t_impact
+
+    _t = time.time()
     graph.save_to_file(out_path)
+    timing["save"] = time.time() - _t
+
+    # 决策智能的汇总（分类分布 / 结果分布 / 置信度统计），进 stats 便于观测。
+    #
+    # ⚠️ 刻意**不**调 `graph.get_decision_insights()`：实测它一个调用要 **23.6 秒**
+    # （4137 节点 / 6328 边 / 23 条决策，advanced_analytics=True），因为里面会
+    # 顺带把社区分析整套重算一遍。而这些汇总数据我们手里本来就有，自己数一遍是
+    # 零成本 —— 花 23 秒让整次建图从 13 秒涨到 44 秒，只为了往日志里多写几个
+    # 分布数字，不划算。
+    # 另外那个返回里带 `frozenset`（advanced_analytics.community_analysis.*），
+    # 直接塞进 JSON 会让 worker 的响应序列化炸掉 —— 这是不用它的第二个理由。
+    insights = {}
+    if decided:
+        cats = {}
+        outs = {}
+        for dec in decided:
+            cats[str(dec.get("category") or "未分类")] = cats.get(str(dec.get("category") or "未分类"), 0) + 1
+            outcomes_key = str(dec.get("outcome") or "")[:120]
+            outs[outcomes_key] = outs.get(outcomes_key, 0) + 1
+        confs = sorted(float(d.get("confidence", 1.0)) for d in decided)
+        insights = {
+            "totalDecisions": len(decided),
+            "categories": cats,
+            "outcomes": outs,
+            # 置信度**算出来**而不是写死。这一层全部来自用户确认过的选择，
+            # 目前恒为 1.0 —— 但真出现别的来源时会自动反映，不用改这里。
+            "confidence": {
+                "mean": round(sum(confs) / len(confs), 4),
+                "min": confs[0],
+                "max": confs[-1],
+                "median": confs[len(confs) // 2],
+            },
+        }
+
+    # 落盘后的真实节点/边数（含 record_decision 自己建的 category 节点）
+    _t = time.time()
+    final = graph.to_dict()
+    timing["to_dict"] = time.time() - _t
+    added_n = len(final.get("nodes") or [])
+    added_e = len(final.get("edges") or [])
 
     return {
         "path": out_path,
@@ -1023,6 +1238,25 @@ def build_context_graph(payload):
         "messages": len(messages),
         "tools": len(tool_calls),
         "decisions": decisions_n,
+        # 决策层用原生 record_decision 建的，所以这些失败是「接口没按预期工作」
+        # 的信号，而不是可以忽略的噪声 —— 全部上报。
+        "decisionsFailed": decisions_failed,
+        "decisionsError": decisions_error,
+        # 有多少条决策因为原始记录缺字段而补了占位符（占位符 = 数据里没有，不是我们编的）
+        "decisionsFilled": decided_placeholder,
+        "impactError": impact_error,
+        "causalFailed": causal_failed,
+        "impactedDecisions": impacted_n,
+        # 图分析（kg.CentralityCalculator + kg.CommunityDetector）
+        "analysis": {
+            "centrality": centrality_n,
+            "communities": community_n,
+            "error": analysis_error,
+            "centralityError": centrality_error,
+            # 连通分量（ConnectivityAnalyzer）
+            "connectivity": connectivity,
+        },
+        "decisionInsights": insights,
         "segments": len(segments),
         "engine": {
             "semantica": SEMANTICA_VERSION,
