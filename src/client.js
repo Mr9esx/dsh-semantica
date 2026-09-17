@@ -184,8 +184,14 @@ const CSS = `
 .semg-box[data-kind="warn"]{border-left-color:#e8a33d}
 .semg-box[data-kind="ok"]{border-left-color:#3aa76d}
 /* ── 控制面板：工具栏 + 内嵌 Explorer 拼成一页 ── */
-.semg-split{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12px;box-sizing:border-box}
-.semg-toolbar{display:flex;flex-direction:column;gap:6px;padding:8px 10px;flex:0 0 auto;border-bottom:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12))}
+/* 就绪态的容器：16px 内缩 + 16px 行距。两块卡片（工具栏 / 图谱）共用同一套外边距，
+   所以它们到面板边缘、以及彼此之间的距离都是 16px。
+   注意 iframe 那张卡片的 16px 是**这里**给的（宿主的 padding 是 0，它精确地盖住
+   .semg-viewbody），别再往宿主上加 padding —— 那会变成里外各 16px、共 32px。 */
+.semg-split{display:flex;flex-direction:column;height:100%;min-height:0;font-size:12px;box-sizing:border-box;padding:16px;gap:16px}
+/* 工具栏也是一张卡片，与下面的图谱卡片同规格：1px 边框 + 8px 圆角 + 同色底。
+   原来它只贴了一条 border-bottom、并且直接顶到面板边缘，跟图谱那块对不上。 */
+.semg-toolbar{display:flex;flex-direction:column;gap:6px;padding:10px 12px;flex:0 0 auto;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff)}
 .semg-toolbar-top{display:flex;align-items:center;justify-content:space-between;gap:8px 12px;flex-wrap:wrap}
 .semg-toolbar-info{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0;flex:0 1 auto}
 /* flex:0 0 auto 在这里是安全的：它只放几个图标按钮，宽度不会超过容器 */
@@ -233,11 +239,9 @@ const CSS = `
 .semg-viewholder{width:100%;height:100%}
 /* iframe 本身**不在这里** —— 它常驻 body 上的 [data-semg-frame-host]，这里只是它的占位。
    原因见 ExplorerFrame 的注释：视图被切走会卸载组件，iframe 必须活过卸载才不重载。 */
-/* 宿主的 16px 内边距 = iframe 到对话视图区边缘的**真实**留白。
-   成立的前提是就绪态的根节点 .semg-split 自己没有 padding（它确实没有）——
-   所以别给 .semg-viewbody 加负 margin 去「抵消」panel 的 padding：那是另一个状态
-   （.semg-panel，忙碌/出错页）的样式，用在这里只会把画布推出容器外、被裁掉。 */
-[data-semg-frame-host]{position:fixed;box-sizing:border-box;padding:16px;display:none;z-index:5}
+/* 宿主精确盖住 .semg-viewbody 的矩形（padding 为 0，不要再加）——
+   iframe 到面板边缘那 16px 由 .semg-split 的内边距给，从这里加会变成 32px。 */
+[data-semg-frame-host]{position:fixed;box-sizing:border-box;display:none;z-index:5}
 [data-semg-frame-host] iframe{display:block;width:100%;height:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff)}
 /* 图谱标签激活时藏掉对话输入框。data-composer-seat 是 ConversationRoot 里写死的稳定属性，
    不是哈希类名；隐藏而不是卸载，所以切回「对话」草稿还在。 */

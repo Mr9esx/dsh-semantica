@@ -60,15 +60,23 @@ const SAME_ROW_MIN = 600
  *
  * ⚠️ 它会跟着第一行的内容走，改第一行就得重量：
  *   700px  无「图已过期」标记（下面主循环量的就是这个）
- *   840px  有标记时（标记 14px 占 72px，把门槛推高 140px）
- * 「重新抽取」按钮搬进第一行时，这个数从 640 涨到了 700。
+ *   820px  有标记时（标记 12px 占 62px，把门槛推高 120px）
+ * 「重新抽取」按钮搬进第一行时，这个数从 640 涨到了 700；
+ * 工具栏改成卡片后内容区又窄了 38px，带标记的那个门槛从 780 涨到 820。
  */
 const CHIP_ONE_LINE_MIN = 700
 /**
  * 第一行多一个「图已过期」标记时的门槛 —— 标记一出现就要到这个宽度 chip 才回得来。
- * 标记 12px 时宽 62px；标成 14px 会变 72px，门槛跟着涨到 840px。
+ *
+ * 这个数是**扫出来**的，不是算的。下面那段会扫 760~860 并把实测值跟这里对齐，
+ * 所以布局一变就会报出来，不用去猜。
+ *
+ * 一个诚实的提醒：这个门槛**对上下文敏感**。同一个 800px，用独立脚本扫是「同行」，
+ * 放到本套件的页面里（堆了很多面板、有滚动条）却是「换行」，差 20px。所以这里钉住的
+ * 是本套件这个上下文里的值；真实 GUI 的字体/滚动条情况未必完全一样，差几个像素是正常的。
+ * 而且换行本身只是变高（工具栏 82px → 108px），不是错误。
  */
-const CHIP_ONE_LINE_MIN_STALE = 780
+const CHIP_ONE_LINE_MIN_STALE = 820
 
 // PathChip 的 title 是「提示语 + 换行 + 完整路径」
 const TIP = '点击复制完整路径（这张图落盘的 JSON 文件）\n'
@@ -346,8 +354,10 @@ console.log('── 图谱标签：iframe 不重载 / 隐藏输入框 / 卡片�
 				return {
 					seatDisplay: getComputedStyle(seat).display,
 					hostDisplay: fh ? hs.display : null,
-					hostPadTop: hs ? hs.paddingTop : null,
-					hostPadLeft: hs ? hs.paddingLeft : null,
+					panelRect: (() => {
+						const b = panel.getBoundingClientRect()
+						return { l: Math.round(b.left), t: Math.round(b.top), w: Math.round(b.width), h: Math.round(b.height) }
+					})(),
 					radius: cs ? cs.borderTopLeftRadius : null,
 					borderW: cs ? cs.borderTopWidth : null,
 					src: f ? f.src : null,
@@ -409,8 +419,14 @@ console.log('── 图谱标签：iframe 不重载 / 隐藏输入框 / 卡片�
 	check('卸载后宿主隐藏（不盖住别的界面）', r.unmounted.hostDisplay === 'none', `display=${r.unmounted.hostDisplay}`)
 
 	// ── 卡片样式（第 3 条）──
-	check('iframe 四周 16px 内边距', r.mounted.hostPadTop === '16px' && r.mounted.hostPadLeft === '16px',
-		`${r.mounted.hostPadTop} / ${r.mounted.hostPadLeft}`)
+	// 16px 由 .semg-split 的内边距给（宿主 padding 为 0，精确盖住 .semg-viewbody）。
+	// 断言**用户看到的**结果 —— iframe 到面板四边各 16px —— 而不是某个实现细节。
+	const PB = r.mounted.panelRect
+	const FB = r.mounted.iframe
+	check('iframe 左/右各离面板 16px', !!PB && !!FB && FB.l - PB.l === 16 && PB.l + PB.w - (FB.l + FB.w) === 16,
+		`panel=${JSON.stringify(PB)} iframe=${JSON.stringify(FB)}`)
+	check('iframe 下边离面板 16px', !!PB && !!FB && PB.t + PB.h - (FB.t + FB.h) === 16,
+		`panel底 ${PB && PB.t + PB.h} iframe底 ${FB && FB.t + FB.h}`)
 	check('iframe 8px 圆角', r.mounted.radius === '8px', String(r.mounted.radius))
 	check('iframe 1px 边框', r.mounted.borderW === '1px', String(r.mounted.borderW))
 	check('iframe 指向 Explorer 地址', r.mounted.src === FRAME_URL, String(r.mounted.src))
@@ -423,10 +439,37 @@ console.log('── 图谱标签：iframe 不重载 / 隐藏输入框 / 卡片�
 		Math.abs(r.mounted.host.w - r.mounted.holder.w) <= 1 &&
 		Math.abs(r.mounted.host.h - r.mounted.holder.h) <= 1,
 		`host=${JSON.stringify(r.mounted.host)} holder=${JSON.stringify(r.mounted.holder)}`)
-	check('iframe 在宿主里向内收 16px', !!r.mounted.host && !!r.mounted.iframe &&
-		r.mounted.iframe.l === r.mounted.host.l + 16 && r.mounted.iframe.t === r.mounted.host.t + 16 &&
-		r.mounted.iframe.w === r.mounted.host.w - 32 && r.mounted.iframe.h === r.mounted.host.h - 32,
+	check('iframe 精确铺满宿主', !!r.mounted.host && !!r.mounted.iframe &&
+		r.mounted.iframe.l === r.mounted.host.l && r.mounted.iframe.t === r.mounted.host.t &&
+		r.mounted.iframe.w === r.mounted.host.w && r.mounted.iframe.h === r.mounted.host.h,
 		`host=${JSON.stringify(r.mounted.host)} iframe=${JSON.stringify(r.mounted.iframe)}`)
+
+	// ── 工具栏也是一张卡片，与图谱同规格（边框 / 圆角 / 16px 内缩）──
+	const TB = await page.evaluate(() => {
+		const tb = document.querySelector('.semg-split .semg-toolbar')
+		const sp = document.querySelector('.semg-split')
+		if (!tb || !sp) return null
+		const cs = getComputedStyle(tb)
+		const b = tb.getBoundingClientRect()
+		const s = sp.getBoundingClientRect()
+		return {
+			border: cs.borderTopWidth + ' ' + cs.borderTopStyle,
+			radius: cs.borderTopLeftRadius,
+			padTop: cs.paddingTop,
+			padLeft: cs.paddingLeft,
+			insetL: Math.round(b.left - s.left),
+			insetT: Math.round(b.top - s.top),
+			insetR: Math.round(s.right - b.right),
+			bottomBorder: cs.borderBottomWidth,
+		}
+	})
+	check('工具栏有 1px 边框', !!TB && TB.border === '1px solid', TB && TB.border)
+	check('工具栏 8px 圆角（与图谱一致）', !!TB && TB.radius === '8px', TB && TB.radius)
+	check('工具栏有自己的内边距', !!TB && parseFloat(TB.padTop) > 0 && parseFloat(TB.padLeft) > 0,
+		TB && `${TB.padTop} / ${TB.padLeft}`)
+	check('工具栏四周与图谱同距（16px）', !!TB && TB.insetL === 16 && TB.insetT === 16 && TB.insetR === 16,
+		TB && `L${TB.insetL} T${TB.insetT} R${TB.insetR}`)
+	check('工具栏不再只有「贴边下边框」', !!TB && TB.bottomBorder === '1px', TB && `下边框 ${TB.bottomBorder}`)
 
 	// sandbox 是安全边界，别在重构里悄悄丢
 	const sb = String(r.mounted.status || '')
@@ -478,7 +521,8 @@ for (const width of WIDTHS) {
 	}
 	check(
 		'控制按钮贴着右边缘（margin-left:auto）',
-		!!r.util && r.util.l + r.util.w >= r.panelW - 12,
+		// 右缘 = 面板宽 - 16(split 内边距) - 1(卡片边框) - 12(工具栏内边距)
+		!!r.util && r.util.l + r.util.w >= r.panelW - 30,
 		`util右缘 ${r.util && r.util.l + r.util.w} vs 面板宽 ${r.panelW}`,
 	)
 	// 第一行只剩信息，必须在按钮行上方
@@ -487,9 +531,14 @@ for (const width of WIDTHS) {
 		!!r.info && !!r.acts && r.info.t + r.info.h <= r.acts.t + 1,
 		`info底 ${r.info && r.info.t + r.info.h} vs acts顶 ${r.acts && r.acts.t}`,
 	)
-	check('工具栏 + 图区 = 面板高度', r.toolbarH + (r.frame ? r.frame.h : 0) >= 719, `${r.toolbarH} + ${r.frame ? r.frame.h : 0}`)
-	// 画布区铺满面板宽：宿主那 16px 内边距才是「iframe 到对话视图区边缘」的真实距离
-	check('画布区铺满面板宽', !!r.frame && Math.abs(r.frame.w - r.panelW) <= 1, `frame.w=${r.frame && r.frame.w} panelW=${r.panelW}`)
+	// 整列必须刚好填满：16(上内边距) + 工具栏 + 16(行距) + 画布 + 16(下内边距) = 720
+	check(
+		'上内边距 + 工具栏 + 行距 + 画布 + 下内边距 = 面板高度',
+		16 + r.toolbarH + 16 + (r.frame ? r.frame.h : 0) + 16 === 720,
+		`16 + ${r.toolbarH} + 16 + ${r.frame ? r.frame.h : 0} + 16`,
+	)
+	// 画布区铺满「16px 内缩之后」的宽度：.semg-split 有 16px 内边距，两张卡片都在里面
+	check('画布区铺满卡片区宽度', !!r.frame && Math.abs(r.frame.w - (r.panelW - 32)) <= 1, `frame.w=${r.frame && r.frame.w} panelW=${r.panelW}`)
 	check('渲染出内嵌 iframe（在常驻宿主里）', !!r.iframe, String(r.iframe && r.iframe.src))
 	check('统计四项齐全', r.stats.length === 4, r.stats.join(' '))
 	check('分析按钮四个齐全', r.buttons.length === 4, r.buttons.join(' | '))
@@ -506,26 +555,34 @@ for (const width of WIDTHS) {
 //
 // 标记本身只有 72px，但它出现时第一行要装「图标 + 4 个统计 + 标记 + 重新抽取 + 路径 chip」，
 // chip 的同行门槛从 700px 被推到 840px。这个数会随着第一行的内容变，所以必须量、不能算。
-console.log('── 「图已过期」标记推高路径 chip 的门槛')
-for (const width of [640, CHIP_ONE_LINE_MIN_STALE]) {
-	const r = await renderPanel({ width, stats: STATS, stale: true })
-	const mini = r.mini
-	const sameLine = !!mini && Math.abs(r.chipT + r.chipH / 2 - (mini.t + mini.h / 2)) <= 2
-	check('过期标记渲染出来了', !!r.tag, `tag=${JSON.stringify(r.tag)}`)
-	if (width < CHIP_ONE_LINE_MIN_STALE) {
-		check(
-			`${width}px 有标记时 chip 换行`,
-			!sameLine,
-			`chip.c=${r.chipT + r.chipH / 2} mini.c=${mini && mini.t + mini.h / 2}`,
-		)
-	} else {
-		check(
-			`${width}px 有标记时 chip 回到第一行`,
-			sameLine,
-			`chip.c=${r.chipT + r.chipH / 2} mini.c=${mini && mini.t + mini.h / 2}`,
+console.log('── 「图已过期」标记推高路径 chip 的门槛（扫描实测，两侧都断言）')
+//
+// 这个门槛**只能在同一个上下文里量**：我先用独立脚本扫出 800px 同行，搬到
+// visual-check 里同样的 800px 却仍然换行 —— 两个上下文的可用宽度并不相同。
+// 所以这里不写死一个「两侧取样」，直接扫过去，然后把实测门槛跟常数对齐。
+{
+	const rows = []
+	for (const width of [760, 780, 800, 820, 840, 860]) {
+		const r = await renderPanel({ width, stats: STATS, stale: true })
+		const mini = r.mini
+		const sameLine = !!mini && Math.abs(r.chipT + r.chipH / 2 - (mini.t + mini.h / 2)) <= 2
+		check(`  ${width}px 过期标记渲染出来了`, !!r.tag, `tag=${JSON.stringify(r.tag)}`)
+		rows.push({ width, sameLine })
+		console.log(
+			`   ${width}px  工具栏高 ${r.toolbarH}  info 高 ${r.info.h}  标记 ${r.tag && r.tag.w}×${r.tag && r.tag.h}  重新抽取 ${r.refresh && r.refresh.w}px  ` +
+				`chip.c=${r.chipT + r.chipH / 2} mini.c=${mini && mini.t + mini.h / 2} → ${sameLine ? '同一行' : '换行'}`,
 		)
 	}
-	console.log(`   ${width}px  工具栏高 ${r.toolbarH}  info 高 ${r.info.h}  标记 ${r.tag && r.tag.w}×${r.tag && r.tag.h}  重新抽取 ${r.refresh && r.refresh.w}px`)
+	const firstSame = rows.find((r) => r.sameLine)
+	check(
+		`带标记时的同行门槛就是 CHIP_ONE_LINE_MIN_STALE=${CHIP_ONE_LINE_MIN_STALE}px（扫描实测）`,
+		!!firstSame && firstSame.width === CHIP_ONE_LINE_MIN_STALE,
+		`实测 ${firstSame ? firstSame.width : '—'}px`,
+	)
+	check(
+		'门槛以下确实换行',
+		rows.filter((r) => r.width < CHIP_ONE_LINE_MIN_STALE).every((r) => !r.sameLine),
+	)
 }
 console.log('')
 
