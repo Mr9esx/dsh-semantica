@@ -1,6 +1,6 @@
 {
   "name": "dsh-semantica-graph",
-  "version": "0.9.4",
+  "version": "0.9.5",
   "description": "DSH 插件：用 Semantica 把当前对话构建成知识图谱，在侧边栏内嵌其自带的 Knowledge Explorer 浏览，并可开新对话让 AI 分析",
   "keywords": [
     "deepseek-harness",

@@ -3,6 +3,9 @@
 // 用法：
 //   node scripts/rebuild-graph.mjs <sessionId> <输出 json 路径> [maxSegments]
 //
+// 不传 maxSegments 就走插件的默认配额（字符预算，见 session-reader 的 DEFAULT_MAX_CHARS），
+// 和界面上点「重新抽取」得到的图一致 —— 量质量时才该用这一档。
+//
 // 存在的理由：图谱的噪声规则只能靠**量真实数据**来验证和调参 —— 光看代码看不出
 // `cy` 是全图度数第五的「实体」。这个脚本走的是和插件完全相同的路径
 // （session-reader 读日志 → buildConversation → graph_worker.build_context_graph），
@@ -22,7 +25,7 @@ if (!sessionId || !outPath) {
 	console.error('用法: node scripts/rebuild-graph.mjs <sessionId> <输出 json 路径> [maxSegments]')
 	process.exit(1)
 }
-const maxSegments = Number(maxSegArg || 1200)
+const maxSegments = Number(maxSegArg) || undefined
 
 const file = await resolveSessionFile({ get: () => null }, sessionId)
 if (!file) {
@@ -35,7 +38,10 @@ const t0 = Date.now()
 const events = parseEvents(readSessionText(file))
 console.log(`  事件 ${events.length} 条，读取 + 解析 ${Date.now() - t0}ms`)
 
-const conversation = buildConversation(events, { maxSegments })
+const conversation = buildConversation(
+	events,
+	maxSegments === undefined ? {} : { maxSegments },
+)
 console.log(`  对话统计: ${JSON.stringify(conversation.stats)}`)
 
 const worker = new SemanticaWorker({ timeoutMs: 900_000 })

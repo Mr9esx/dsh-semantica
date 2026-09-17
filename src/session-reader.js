@@ -9,9 +9,29 @@
 // fzstd 会连续解完所有帧，因此用它做主路径；node:zlib 仅作单帧兜底。
 //
 // 读取路径优先走 host 服务 ctx.sessionPersistence（list + locate 拿绝对产物路径），
-// 服务缺席时回退到直接扫描 $DSH_HOME/sessions。刻意**不用** load()/inspect()：
-// 对仍绑定活动回合的会话，load 会先刷新快照并在回合开放时拒绝，而正在进行的对话
-// 恰恰就是我们要画的那个。
+// 服务缺席时回退到直接扫描 $DSH_HOME/sessions。
+//
+// ── 为什么不用 sessionPersistence 的 load() / inspect()（实测结论，别再试一遍）──
+//
+// 这里原来是另一条理由（「load 会在回合开放时拒绝」）。那条**不准确**，查源码对不上：
+// inspect() 对活跃会话是 `inspectLive(live)` 直接返回内存视图，没有任何「开放回合就
+// 拒绝」的判定；它的 closers 补的是 `interruptedTurnClosers()` —— 崩溃留下的**被中断**
+// 回合，不是正在进行的回合。真正该避开的是 load()：它会 commitPrepared，
+// 在有 torn tail 时**截断并改写会话文件**。
+//
+// 但 inspect() 仍然不能用，原因是**磁盘布局**：
+//   · 后端用 `join(projectDir, encodeSegment(id))` 拼路径，encodeSegment 是逐字符
+//     转义、对 UUID 原样返回 —— 也就是当前布局是 `<cwd>/<uuid>/session.jsonl.zstd`。
+//   · 实测：新布局的会话 inspect() 能找到；而 `session-<uuid>/` 这种**旧布局**一律
+//     抛 SessionPersistenceNotFoundError（用离线脚本对磁盘上 61 个旧布局会话全试过，
+//     0 成功；对 48 个新布局会话全部走到后续步骤）。
+//   · 正在画图的那个会话恰恰是旧布局 —— 它是 app 更新之前创建的，DSH 之后一直往
+//     老目录里追加。所以 inspect() 看不见的正是我们最常画的那种会话。
+//
+// 而直接读文件对两种布局都能工作（同一实测里 4/4 成功：旧布局 1 个 + 新布局 3 个），
+// 因为回退扫描是按 sessionId 找目录名，两种命名都认。
+// 所以读取路径就一条：locate() 拿路径 → 读文件。别再加 inspect() 做「优先/回退」，
+// 那会把一条可靠的路径变成两条都要维护的路径。
 
 import { zstdDecompressSync } from 'node:zlib'
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs'
@@ -34,6 +54,19 @@ const ZSTD_MAGIC = 0x28b52ffd
 
 /** 会话日志的可能文件名。 */
 const SESSION_FILENAMES = ['session.jsonl.zstd', 'session.jsonl']
+
+/**
+ * 送入抽取的正文**字符**预算（不是段数）。
+ *
+ * 为什么不用段数：实测同一段会话平均 156 字/段，段数和文本量根本不成比例 ——
+ * 一段 1300 段的会话正文总共才 20.5 万字符，而原来 1200 段的硬上限会白白裁掉
+ * 98 段（最前面 19 分钟）。真正决定抽取耗时的是字符数（实测约 2.2 万字符/秒，
+ * 600 段/9 秒），所以预算该按字符给。
+ *
+ * 40 万字符 ≈ 18 秒 NER。正常会话远够用（实测 1.5 小时会话只有 5.5 万字符），
+ * 这个上限只用来兜住极端超长会话。
+ */
+export const DEFAULT_MAX_CHARS = 400_000
 
 /** 解析 DSH_HOME：环境变量优先，其次 desktop 默认位置，最后 ~/.dsh。 */
 export function resolveDshHome() {
@@ -192,7 +225,8 @@ function clip(s, n) {
  *
  * @param events 会话事件数组
  * @param opts.maxToolResult 工具结果保留的最大字符数（超长结果会撑爆 NER）
- * @param opts.maxSegments 送入抽取的文本段上限（保留最新的）
+ * @param opts.maxSegments 送入抽取的文本段数上限（默认不限；配额交给 maxChars）
+ * @param opts.maxChars 送入抽取的正文总字符预算（保留最新的，默认 DEFAULT_MAX_CHARS）
  */
 /**
  * 提问工具的名字。DSH 里用户做「选择」几乎都走它，所以这是对话中
@@ -284,7 +318,9 @@ function decisionOf(call, q, ans) {
 
 export function buildConversation(events, opts = {}) {
   const maxToolResult = opts.maxToolResult ?? 1500
-  const maxSegments = opts.maxSegments ?? 400
+  // 段数默认**不限** —— 配额改由下面的字符预算决定，段数只是调用方想硬压时的开关
+  const maxSegments = opts.maxSegments ?? Infinity
+  const maxChars = opts.maxChars ?? DEFAULT_MAX_CHARS
   // 默认只看真实对话；打开则连运行时上下文/技能目录这类系统注入文本一起抽
   const includeInjected = opts.includeInjected === true
 
@@ -452,17 +488,33 @@ export function buildConversation(events, opts = {}) {
   // 工具调用的结构价值已经由 toolCalls 单独承载（→ 图里的 tool 节点），
   // 所以这里整段丢掉不会丢失任何东西，反而让实体层全是真实对话概念。
 
-  // 选段：只保留最近 maxSegments 段。
+  // 选段：按**字符预算**裁剪，不按段数。
   //
   // 这里曾经按角色分配额（给工具段单独设 35% 上限）。那是在工具段还在喂 NER 时
   // 加的保护：当时用 `slice(-400)` 取最新，在编码类会话里尾部 400 段 100% 是工具
   // 段，只带进来 12.8K 字符的工具名碎片，而同期被丢掉的助手正文有 343K 字符，
   // 结果实体全是命令行片段、关系几乎为零。
   //
-  // 现在工具段已不参与抽取、reasoning 也已排除，剩下的全是对话正文，配额自然
-  // 失去意义 —— 每段都是等价的正文，取最近的即可。实测一段 1.5 小时的会话，
-  // 正文全量只有 5.5 万字符 / 927 段，远低于默认上限，等于不截断。
-  const trimmed = segments.length > maxSegments ? segments.slice(-maxSegments) : segments
+  // 现在工具段已不参与抽取、reasoning 也已排除，剩下的全是对话正文 —— 每段都是
+  // 等价的正文，所以「留下哪些」没有取舍空间，只有「留多少」的问题。
+  // 而「留多少」按段数算是错的：段长差异很大，段数不反映成本也不反映信息量。
+  // 实测本会话 1319 段只有 20.5 万字符，旧的 1200 段上限白白裁掉了最前面 98 段。
+  //
+  // 从最新往旧累加，超预算就停：宁可丢掉时间上更远的开头，也要保住最近的上下文。
+  const cap = Number.isFinite(maxSegments) && maxSegments > 0 ? maxSegments : Infinity
+  let trimmed = segments.length > cap ? segments.slice(-cap) : segments
+  if (Number.isFinite(maxChars) && maxChars > 0) {
+    let used = 0
+    let from = trimmed.length
+    while (from > 0) {
+      const len = trimmed[from - 1].text?.length ?? 0
+      // 至少留一段：单段就超预算时不能裁成空
+      if (used + len > maxChars && from < trimmed.length) break
+      used += len
+      from--
+    }
+    trimmed = trimmed.slice(from)
+  }
 
   return {
     title,
@@ -491,6 +543,9 @@ export function buildConversation(events, opts = {}) {
       toolCalls: toolCalls.length,
       decisions: decisions.length,
       segments: trimmed.length,
+      // 字符用量：预算是否吃紧、有没有真的裁掉东西，看这两个数就够了
+      segmentChars: trimmed.reduce((n, seg) => n + (seg.text?.length ?? 0), 0),
+      segmentCharsBudget: DEFAULT_MAX_CHARS,
     },
   }
 }

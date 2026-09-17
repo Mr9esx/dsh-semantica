@@ -225,12 +225,13 @@ function apply(ctx) {
 
       // 3) 抽对话结构（骨架 + 喂给 NER 的文本段）
       //
-      // 默认配额给得比较宽（1200 段），因为排除 reasoning 之后正文总量很小：
-      // 实测一段 1.5 小时、含 559 轮助手消息的会话，去掉思考过程后正文只有
-      // 5.5 万字符 / 927 段 —— 全量装下比只取尾部既更完整、又更便宜
-      // （修复前光是尾部 400 段就要 42 万字符）。这里的上限只是给超长会话兜底。
+      // 配额交给 session-reader 的**字符预算**（DEFAULT_MAX_CHARS，40 万字符），
+      // 这里不再写死段数。原来写死 1200 段是错的尺度：段长差异很大，段数既不反映
+      // 成本也不反映信息量 —— 实测本会话 1319 段只有 20.5 万字符，1200 段的硬上限
+      // 白白裁掉了最前面 98 段，而 40 万字符的预算完全装得下。
+      // 调用方（/prepare 的 body）显式传了 maxSegments 时仍然照办。
       const conversation = buildConversation(events, {
-        maxSegments: Number.isFinite(maxSegments) ? maxSegments : 1200,
+        ...(Number.isFinite(maxSegments) ? { maxSegments } : {}),
       })
 
       if (conversation.segments.length === 0) {
