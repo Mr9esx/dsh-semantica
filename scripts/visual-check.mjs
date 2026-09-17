@@ -104,9 +104,15 @@ const check = (label, ok, extra) => {
 console.log(`Explorer: ${EXPLORER}`)
 console.log(`截图目录: ${OUT}\n`)
 
-for (const width of WIDTHS) {
-	const r = await page.evaluate(
-		async ({ width, explorer, stats }) => {
+// 侧边栏宽度：better-sidebar 出厂值是「窗口宽度 35%」，1380px 窗口 = 483px。
+// 插件会在图谱面板展开时把它拉到 600px（只加宽，不回缩）。
+const SEED_WIDTH_NARROW = 483
+const SEED_WIDTH_WIDE = 700
+const EXPANDED_WIDTH = 600
+
+const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
+	page.evaluate(
+		async ({ width, explorer, stats, seedWidth }) => {
 			const host = document.getElementById('host')
 			host.innerHTML = ''
 			const panel = document.createElement('div')
@@ -114,6 +120,7 @@ for (const width of WIDTHS) {
 			panel.id = `panel-${width}`
 			host.appendChild(panel)
 
+			const widthWrites = []
 			const mod = window.__plugin.factory((n) => {
 				if (n === 'react') return React
 				throw new Error(`意外的 require("${n}")`)
@@ -138,7 +145,15 @@ for (const width of WIDTHS) {
 			ReactDOM.createRoot(panel).render(
 				React.createElement(components['semantica:launcher'], {
 					ctx,
-					store: { getPrefs: () => ({}), getSnapshot: () => ({}), reduce: () => {}, subscribe: () => () => {} },
+					// 真 store 的形状：getSnapshot().state.width 是当前宽度，
+					// reduce(fn) 提交一个新 state。这里把 reduce 的产物记下来，
+					// 好断言插件到底有没有改宽度、改成了多少。
+					store: {
+						getPrefs: () => ({}),
+						getSnapshot: () => ({ state: { width: seedWidth } }),
+						reduce: (fn) => { widthWrites.push(fn({ width: seedWidth })) },
+						subscribe: () => () => {},
+					},
 					scope: { sessionId: 'sess-visual' }, sessionId: 'sess-visual', visible: true,
 					tab: { id: 'semantica:launcher' },
 				}),
@@ -175,6 +190,8 @@ for (const width of WIDTHS) {
 			const chipLabelAfter = chip ? (chip.querySelector('code') || {}).textContent || '' : null
 
 			return {
+				widthWrites: widthWrites.map((st) => st.width),
+				viewportW: window.innerWidth,
 				toolbarH: toolbar ? Math.round(toolbar.getBoundingClientRect().height) : 0,
 				chipText,
 				chipTitle,
@@ -189,9 +206,11 @@ for (const width of WIDTHS) {
 				overlap,
 			}
 		},
-		{ width, explorer: EXPLORER, stats: STATS },
+		{ width, explorer: EXPLORER, stats: STATS, seedWidth },
 	)
 
+for (const width of WIDTHS) {
+	const r = await renderPanel({ width, explorer: EXPLORER, stats: STATS, seedWidth: SEED_WIDTH_NARROW })
 	console.log(`── ${width}px  工具栏高 ${r.toolbarH}  图区 ${r.frame ? `${r.frame.w}×${r.frame.h}` : '—'}`)
 	check('没有横向溢出', r.overflowX === 0, `溢出 ${r.overflowX}px`)
 	check('信息区与按钮组不重叠', r.overlap === false)
@@ -207,6 +226,37 @@ for (const width of WIDTHS) {
 	await page.locator(`#panel-${width}`).screenshot({ path: join(OUT, `panel-${width}.png`) })
 	console.log('')
 }
+
+// ── 侧边栏宽度：图谱面板展开时自动加宽到 600px ──
+//
+// 出厂宽度 483px 放不下 Explorer（它自带一条约 240px 的左栏），所以插件在
+// 面板展开时把侧边栏拉到 600px。三条断言：会加宽、不反复触发、不越界。
+console.log('── 侧边栏宽度')
+const narrow = await renderPanel({ width: 520, explorer: EXPLORER, stats: STATS, seedWidth: SEED_WIDTH_NARROW })
+check(
+	`出厂宽度 ${SEED_WIDTH_NARROW}px → 加宽到 ${EXPANDED_WIDTH}px`,
+	narrow.widthWrites[0] === EXPANDED_WIDTH,
+	`写入 ${JSON.stringify(narrow.widthWrites)}`,
+)
+check('只写一次（展开期间不反复触发）', narrow.widthWrites.length === 1, `${narrow.widthWrites.length} 次`)
+
+const wide = await renderPanel({ width: 520, explorer: EXPLORER, stats: STATS, seedWidth: SEED_WIDTH_WIDE })
+check(
+	`用户已经拖到 ${SEED_WIDTH_WIDE}px 时不动它（只加宽不回缩）`,
+	wide.widthWrites.length === 0,
+	`写入 ${JSON.stringify(wide.widthWrites)}`,
+)
+
+// 视口 < 768px 时 better-sidebar 切成全屏抽屉，面板铺满窗口，改宽度没有意义
+await page.setViewportSize({ width: 700, height: 720 })
+const drawer = await renderPanel({ width: 520, explorer: EXPLORER, stats: STATS, seedWidth: SEED_WIDTH_NARROW })
+check(
+	'窄视口（抽屉模式）下不加宽',
+	drawer.widthWrites.length === 0,
+	`视口 ${drawer.viewportW}px，写入 ${JSON.stringify(drawer.widthWrites)}`,
+)
+await page.setViewportSize({ width: 1280, height: 720 })
+console.log('')
 
 // iframe 里真的渲染出东西了吗（sandbox 缺 allow-same-origin 会白屏）
 if (EXPLORER !== 'about:blank') {

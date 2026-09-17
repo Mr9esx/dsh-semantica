@@ -576,6 +576,73 @@ window.__ModuleLoader__.load({
 			);
 		}
 
+		// ────────────────────────── 侧边栏宽度 ──────────────────────────
+		//
+		// 图谱视图是个完整的 web app（Explorer 自己还有一条左侧栏），在
+		// better-sidebar 的出厂宽度下根本铺不开 —— 出厂值是「窗口宽度的 35%」，
+		// 1380px 的窗口就是 483px，而 Explorer 的左栏就吃掉约 240px。
+		//
+		// 这几个常量是 better-sidebar 的契约值，抄过来照原样用：
+		//   PANEL_MIN        = 280   （约束下限）
+		//   NARROW_MAX_WIDTH = 768   （低于它就是全屏抽屉模式，见 breakpoints.ts）
+		// 另外别被 state.ts 里的 PANEL_MAX = 640 骗了 —— 它只在 window 不存在的
+		// 时候当兜底；真正生效的上限是 window.innerWidth。
+		const PANEL_FLOOR = 280;
+		const PANEL_NARROW = 768;
+		/** 我们想要的宽度：够 Explorer 铺开，又不至于把对话区挤没。 */
+		const PANEL_COMFORT = 600;
+
+		/**
+		 * 目标宽度；窄到进抽屉模式时返回 null（那种情况面板铺满窗口，
+		 * 动 width 没有意义，反而会把持久化的值改坏）。
+		 */
+		function comfortPanelWidth() {
+			const vw =
+				typeof window !== "undefined" && Number.isFinite(window.innerWidth)
+					? window.innerWidth
+					: 0;
+			if (vw < PANEL_NARROW) return null;
+			// 镜像 better-sidebar 的 setWidth 钳制：下限贴 PANEL_MIN，上限贴视口。
+			return Math.min(Math.max(PANEL_FLOOR, vw), Math.max(PANEL_FLOOR, PANEL_COMFORT));
+		}
+
+		/**
+		 * 把侧边栏拉到能看的宽度。**只加宽，绝不回缩** —— 用户自己拖宽过就尊重他。
+		 *
+		 * 走的是 tab 组件拿到的 better-sidebar store（Sidebar.tsx 把它作为 prop
+		 * 传给每个 tab 组件），因为公开的 `ctx.betterSidebar` 服务没有宽度方法，
+		 * `OpenTabSeed` 里也没有宽度字段。`store.reduce` 会一并写
+		 * `dsh-sidebar:v1:width`，所以这个宽度对所有对话生效。
+		 *
+		 * 加宽纯粹是体验优化，任何一步不成立就直接放弃 —— 绝不能因为这个把面板搞崩。
+		 */
+		function widenPanel(store) {
+			try {
+				if (
+					!store ||
+					typeof store.getSnapshot !== "function" ||
+					typeof store.reduce !== "function"
+				) {
+					return false;
+				}
+				const target = comfortPanelWidth();
+				if (target === null) return false;
+				const snap = store.getSnapshot();
+				const state = snap && snap.state;
+				if (!state || typeof state.width !== "number") return false;
+				if (state.width >= target) return false;
+				const before = state.width;
+				store.reduce((prev) => ({ ...prev, width: target }));
+				console.info(
+					"[semantica-graph] 侧边栏 " + before + "px → " + target + "px（图谱视图需要更宽）",
+				);
+				return true;
+			} catch (e) {
+				console.warn("[semantica-graph] 加宽侧边栏失败", e);
+				return false;
+			}
+		}
+
 		function LauncherView(props) {
 			ensureStyles();
 			const ctx = props.ctx;
@@ -595,6 +662,9 @@ window.__ModuleLoader__.load({
 			// 只是重新载入内嵌的 Explorer，不重跑抽取
 			const [reloadKey, setReloadKey] = useState(0);
 			const startedFor = useRef(null);
+			// 每次「收起 → 展开」只检查一次宽度。收起时重置，所以下次打开会再看一眼；
+			// 展开期间不重复触发，用户拖到哪儿就是哪儿，不会跟他抢。
+			const widthChecked = useRef(false);
 
 			const run = useCallback(
 				async (refresh) => {
@@ -634,6 +704,19 @@ window.__ModuleLoader__.load({
 			);
 
 			// 面板可见时才干活（隐藏时不浪费 CPU），每个会话只自动跑一次
+			// 图谱面板一展开，就把侧边栏拉到一个能看的宽度。放在这里而不是启动流程里，
+			// 是因为「打开图谱」既可能是点标题旁的按钮，也可能是切回这个 tab ——
+			// 两者都会让 visible 变 true，而用户要的是「看到图的时候宽度是够的」。
+			useEffect(() => {
+				if (!visible) {
+					widthChecked.current = false;
+					return;
+				}
+				if (widthChecked.current) return;
+				widthChecked.current = true;
+				widenPanel(store);
+			}, [visible, store]);
+
 			useEffect(() => {
 				if (!visible) return;
 				if (startedFor.current === sessionId) return;

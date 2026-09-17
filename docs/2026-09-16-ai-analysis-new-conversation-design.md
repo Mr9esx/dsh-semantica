@@ -153,6 +153,49 @@ provider / model / reasoningEffort。选模型失败不致命，只记 warn。
 工具按钮约 180px，一行在 320-420px 的侧边栏里放不下。硬塞进一个 `flex-wrap`
 容器反而出了 bug（见下）。
 
+### 6.1 侧边栏宽度：出厂 483px 放不下 Explorer
+
+**起因**：试用后反馈「打开宽度现在是多少，感觉有点窄了」。
+
+**查出来的事实**（不是猜的）：
+
+better-sidebar 的面板初始宽度是**窗口宽度的百分比**，出厂 `defaultWidthPercent = 35`
+（可调范围 20–60）。当前值存在 localStorage 的 `dsh-sidebar:v1:width` 里 —— 它是
+Electron 应用，这一条落在 `~/Library/Application Support/dsh-desktop/Local Storage/leveldb`
+的 LevelDB 里，键后面紧跟一个 Latin-1 前缀字节再接值，二进制里能直接读出来：
+
+```
+键: dsh-sidebar:v1:width      值: 483
+```
+
+483 正好等于 `max(280, round(1380 × 35%))` —— 1380px 的窗口。也就是说这个宽度**从来
+没被调过**，它一直是出厂默认值，从没为"看图谱"这件事优化过。而 Explorer 自带一条约
+240px 的左侧栏，483px 里只剩 240px 给画布。
+
+范围上有两个容易看错的地方：
+- **下限 280**（`PANEL_MIN`）。
+- **上限是窗口宽度，不是 640**。源码里有个 `PANEL_MAX = 640`，但它只在 `window`
+  不存在时当兜底；`clampWidth` 实际用的是 `Math.max(PANEL_MIN, window.innerWidth)`。
+  所以能拖到接近全屏。
+
+**插件怎么改宽度**：公开路走不通 —— `ctx.betterSidebar` 服务 14 个方法里没有一个碰宽度，
+`OpenTabSeed` 也没有宽度字段。但 `Sidebar.tsx` 会把 better-sidebar **自己的
+`SidebarStore`** 作为 prop 传给每个 tab 组件，而它有公开的 `reduce(reducer)`；
+`setWidth` 是 `state.ts` 导出的纯函数。`reduce → schedulePersist → writeGlobalWidth`
+会一并写 `dsh-sidebar:v1:width`，所以改完之后**所有对话共用**这个宽度。
+
+**行为**（按反馈选定）：面板展开时如果宽度 < 600px 就拉到 600px。
+
+- **只加宽，绝不回缩** —— 用户自己拖到 700px 就尊重他，不"纠正"回去。
+- **每次「收起 → 展开」只检查一次**，展开期间不重复触发，不跟用户的拖动抢。
+- **视口 < 768px 时不做** —— better-sidebar 的 `NARROW_MAX_WIDTH = 768`，低于它面板是
+  铺满窗口的全屏抽屉，这时候改 width 没有意义，反而会把持久化的值写坏。
+- 纯体验优化，任何一步不成立就放弃并 `console.warn`，绝不因为加宽把面板搞崩。
+
+`scripts/visual-check.mjs` 里用真 store 的形状（`getSnapshot().state.width` +
+`reduce(fn)`）验了四条，其中两条是反向用例：会加宽到 600、只写一次、
+**已经 700px 时一个字都不写**、**窄视口下不写**。
+
 #### 一个只有真浏览器才能发现的 CSS 坑
 
 ```css
