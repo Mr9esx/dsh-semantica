@@ -230,7 +230,18 @@ const CSS = `
 .semg-action-icon{opacity:.7;flex:none}
 .semg-action-text{overflow:hidden;text-overflow:ellipsis}
 .semg-viewbody{position:relative;flex:1 1 auto;min-height:0}
-.semg-viewbody iframe{display:block;width:100%;height:100%;border:0}
+.semg-viewholder{width:100%;height:100%}
+/* iframe 本身**不在这里** —— 它常驻 body 上的 [data-semg-frame-host]，这里只是它的占位。
+   原因见 ExplorerFrame 的注释：视图被切走会卸载组件，iframe 必须活过卸载才不重载。 */
+/* 宿主的 16px 内边距 = iframe 到对话视图区边缘的**真实**留白。
+   成立的前提是就绪态的根节点 .semg-split 自己没有 padding（它确实没有）——
+   所以别给 .semg-viewbody 加负 margin 去「抵消」panel 的 padding：那是另一个状态
+   （.semg-panel，忙碌/出错页）的样式，用在这里只会把画布推出容器外、被裁掉。 */
+[data-semg-frame-host]{position:fixed;box-sizing:border-box;padding:16px;display:none;z-index:5}
+[data-semg-frame-host] iframe{display:block;width:100%;height:100%;box-sizing:border-box;border:1px solid var(--dsw-alias-border-l2,rgba(0,0,0,.12));border-radius:8px;background:var(--dsw-alias-bg-layer-1,#fff)}
+/* 图谱标签激活时藏掉对话输入框。data-composer-seat 是 ConversationRoot 里写死的稳定属性，
+   不是哈希类名；隐藏而不是卸载，所以切回「对话」草稿还在。 */
+[data-semg-hide-composer] [data-composer-seat]{display:none}
 .semg-viewload{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;gap:8px;pointer-events:none;color:var(--dsw-alias-label-secondary,#888);font-size:12px}
 `;
 
@@ -574,40 +585,83 @@ const CSS = `
 		 *   scope   —— 只为兜底取 sessionId，现在槽直接给 sessionId
 		 *   visible —— 视图被切走时直接卸载，挂载着就是可见
 		 */
+		/**
+		 * 上一次 prepare 成功的结果，按会话存。**它同时活过组件卸载。**
+		 *
+		 * 为什么需要：conversation.view 槽对非激活视图是过滤掉的，所以切走标签会卸载
+		 * 这个组件、切回来重新挂载。没有缓存的话，每次切回来都是「stats/url 全空 →
+		 * 重新拉一次 → 才显示」，看起来就像每次都在重新提取（宿主其实有缓存、不会真
+		 * 重抽，但客户端这一下照样是空的）。
+		 *
+		 * `at` 记时间戳，用来给「静默复查」限流。
+		 */
+		const preparedBySession = new Map();
+
+		/**
+		 * 缓存多久之后才值得静默复查一次（只为刷新 `图已过期` 这个标记）。
+		 *
+		 * 不能每次挂载都查：宿主那边为了判断 stale 要读并解析整个会话日志，
+		 * 长会话是有实打实开销的，而切标签是高频操作。
+		 */
+		const REVALIDATE_AFTER_MS = 20_000;
+
 		function LauncherView(props) {
 			ensureStyles();
 			const sessionId = props.sessionId || null;
+			// 有缓存就直接以「就绪」开场 —— 切回来是秒开，不闪加载态、不重抽
+			const seed = sessionId ? preparedBySession.get(sessionId) : null;
 
-			const [phase, setPhase] = useState("idle"); // idle | working | ready | error
-			const [stats, setStats] = useState(null);
-			const [url, setUrl] = useState(null);
+			const [phase, setPhase] = useState(seed ? "ready" : "idle"); // idle | working | ready | error
+			const [stats, setStats] = useState(seed ? seed.stats : null);
+			const [url, setUrl] = useState(seed ? seed.url : null);
 			const [err, setErr] = useState(null);
-			const [stale, setStale] = useState(false);
+			const [stale, setStale] = useState(seed ? seed.stale : false);
 			// AI 分析：哪个按钮在跑（null = 没跑），以及上一次的结果
 			const [busyKind, setBusyKind] = useState(null);
 			const [analysis, setAnalysis] = useState(null);
-			const startedFor = useRef(null);
+			// 这次挂载已经为哪个会话发起过 prepare。
+			//
+			// 缓存是**异步**才写进去的（要等宿主返回），所以在「已发起、还没回来」这段窗口里
+			// 光看缓存是拦不住的 —— 仍然需要一个同步守卫，否则 effect 一旦重跑就会重复发起
+			// （React StrictMode 在 dev 下本来就会把 effect 跑两遍）。
+			const preparedFor = useRef(null);
 
 			const run = useCallback(
-				async (refresh) => {
+				async (refresh, opts) => {
+					// silent：静默复查。不置 working、失败也不把面板打成错误页 ——
+					// 它是「顺便看一眼图过期没有」，不该打扰已经画好的界面。
+					const silent = Boolean(opts && opts.silent);
 					if (!sessionId) {
+						if (silent) return;
 						setErr({ error: "拿不到 sessionId" });
 						setPhase("error");
 						return;
 					}
-					setPhase("working");
-					setErr(null);
+					if (!silent) {
+						setPhase("working");
+						setErr(null);
+					}
 					try {
 						const data = await prepare(sessionId, refresh);
 						if (!data || data.ok !== true) {
+							if (silent) return;
 							setErr(data || { error: "宿主没有返回结果" });
 							setPhase("error");
 							return;
 						}
-						setStats(data.stats || null);
-						setUrl(data.url || null);
-						setStale(data.stale === true);
+						const nextStats = data.stats || null;
+						const nextUrl = data.url || null;
+						const nextStale = data.stale === true;
+						setStats(nextStats);
+						setUrl(nextUrl);
+						setStale(nextStale);
 						setPhase("ready");
+						preparedBySession.set(sessionId, {
+							stats: nextStats,
+							url: nextUrl,
+							stale: nextStale,
+							at: Date.now(),
+						});
 						// 刻意**不自动打开 Explorer 标签**。
 						//
 						// 更早的版本在这里直接切到 Explorer 界面，理由是「用户点按钮就是为了看图」。
@@ -618,6 +672,7 @@ const CSS = `
 						//
 						// 现在面板留在原处，要看图点「打开完整 Explorer」那个主按钮。
 					} catch (e) {
+						if (silent) return;
 						setErr({ error: String((e && e.message) || e) });
 						setPhase("error");
 					}
@@ -625,24 +680,41 @@ const CSS = `
 				[sessionId],
 			);
 
-			// 挂载后自动跑一次（已经跑过同一个会话就不再跑）。
+			// 挂载效果。规则一句话：**有缓存就不重抽。**
 			//
-			// 以前这里有三个 effect，围着 better-sidebar 的 `visible`（收起时组件仍在，
-			// 只是不可见）和「打开时把面板加宽到 640px」打转。现在面板是对话视图：
-			// 切走时**直接卸载**、切回来重新挂载，所以
-			//   「可见」≡「挂载」（不需要 visible 判断）
-			//   「收起 → 展开重来一次」≡「卸载 → 挂载」（不需要手动清 startedFor）
-			//   「加宽面板」（不需要 —— 视图区本来就是整个对话区）
+			// 以前这里是「挂载就 prepare 一次」，理由是「切走→切回等于重来一次，正好让
+			// 死掉的 Explorer 自愈」。但那个代价主人直接感受到了：「每次切 tab 都会展示
+			// 提取，好难受」—— 宿主确实有缓存、不会真重抽，可客户端这一下 stats/url 是空的，
+			// 界面照样白一下。
 			//
-			// 那个「重来一次」仍然是必要的：Semantica 的 Explorer 闲置约 10 分钟会自己死，
-			// 重挂时重新 prepare 会让宿主发现 worker 没了、重拉一个，拿到新端口 → url 变了
-			// → iframe 重挂，自愈。不会闪：渲染里 `phase === "working" && !url` 才显示
-			// 加载态，已有 url 时旧的图留在原地。
+			// 现在缓存放在组件外（会活过卸载），所以切回来是立刻就有画面。
+			// 自愈改由两条路兜：`重新抽取` 按钮（显式），以及缓存超过
+			// REVALIDATE_AFTER_MS 后的静默复查。
 			useEffect(() => {
-				if (startedFor.current === sessionId) return;
-				startedFor.current = sessionId;
-				run(false);
+				if (!sessionId) return;
+				const cached = preparedBySession.get(sessionId);
+				if (!cached) {
+					// 第一次看这个会话：正常拉一次（会有加载态）。
+					// 同步守卫挡住重复发起 —— 见 preparedFor 的注释。
+					if (preparedFor.current === sessionId) return;
+					preparedFor.current = sessionId;
+					run(false);
+					return;
+				}
+				// 有缓存 → **不重抽**。上面已经从缓存把状态初始化好了，所以这里什么都不做，
+				// 界面立刻就位。这正是主人反馈的「每次切 tab 都在提取」的修法。
+				//
+				// 只有缓存放了一会儿（超过 REVALIDATE_AFTER_MS）才静默复查一次，只为让
+				// 「图已过期」这个标记跟上会话 —— 静默模式不动 phase，所以不会闪。
+				if (Date.now() - cached.at >= REVALIDATE_AFTER_MS) run(false, { silent: true });
 			}, [sessionId, run]);
+
+			// 面板在的时候把对话输入框藏掉（它挤在整屏画布下面既用不上又占地方）。
+			// 挂载即隐藏、卸载即恢复 —— 所以只切到「对话」标签，输入框和草稿都还在。
+			useEffect(() => {
+				setComposerHidden(true);
+				return () => setComposerHidden(false);
+			}, []);
 
 			// — 开子会话让 AI 分析 —
 			//
@@ -861,7 +933,7 @@ const CSS = `
 						// 这里原本还有「刷新」（重挂 iframe、不重跑抽取）和「重新打开」。刷新删掉后
 						// 面板内就没有手动重载入口了 —— 但那不是能力丢失：面板改成每次「收起 → 展开」
 						// 都重新 prepare 一次，Explorer 挂掉时宿主会重拉 worker、换新端口，url 变了
-						// iframe 自然重挂（见 LauncherView 里 startedFor 的注释）。
+						// iframe 重挂（url 变了时 pointFrameHostAt 会换掉那个 iframe）。
 						//
 						// 原本还有「重新打开」，在侧边栏另开一个整屏标签看图。那个按钮是它唯一的入口，
 						// 删掉之后 ExplorerView / openExplorerTab 那套就彻底到不了了，一并删了 ——
@@ -901,26 +973,182 @@ const CSS = `
 		}
 
 		// ─────────────────── 内嵌的 Explorer（iframe） ───────────────────
+		//
+		// ## 为什么这段这么绕：iframe 必须活过组件卸载
+		//
+		// conversation.view 槽对非激活视图是**过滤掉**的（renderer 里就是
+		// `list.filter(item => item.id === opts.only)`），所以切走标签会真的卸载我们的
+		// 组件 —— 连带销毁里面的 iframe。而 Explorer 是个 SPA，每次重载都要从头启动，
+		// 于是每次切回来看起来都像「又在提取」。
+		//
+		// 实测过两条路，第一条是死的：
+		//
+		//   1. 「卸载前把 iframe 抢救到别处、回来再搬回去」—— **不行**。playwright 实测
+		//      在 DOM 里 appendChild 搬动一个 iframe 会让它**重新加载**（搬 4 次 = 加载
+		//      5 次）。iframe 一旦脱离文档，它的浏览上下文就被丢弃了。
+		//
+		//   2. 「iframe 从头到尾待在同一个父节点里，宿主挂在 body 上、只改 CSS」—— **行**。
+		//      实测只改宿主的 display（含 display:none ↔ block）、visibility、尺寸，
+		//      累计 load 次数恒为 1。
+		//
+		// 所以宿主常驻 document.body（不随视图卸载），靠 position:fixed 摆到视图里那个
+		// 占位元素的位置上。没用 createPortal —— 客户端半侧只能 require("react")，
+		// 拿不到 react-dom。
+		//
+		// 代价：位置得自己同步（ResizeObserver + resize/scroll），而且必须保证
+		// **不在图谱标签时一定隐藏**，否则这块 fixed 会盖住别的界面。
+		const frameHost = {
+			el: null,
+			iframe: null,
+			url: null,
+			/** 已经加载完成的 url；组件后挂载时据此决定要不要显示加载遮罩 */
+			loadedUrl: null,
+			onLoad: null,
+		};
+
+		/** 拿到（必要时创建）常驻宿主。宿主被外力摘掉时会把记录一并清空。 */
+		function ensureFrameHost() {
+			if (frameHost.el && frameHost.el.isConnected) return frameHost.el;
+			const el = document.createElement("div");
+			el.setAttribute("data-semg-frame-host", "");
+			document.body.appendChild(el);
+			frameHost.el = el;
+			frameHost.iframe = null;
+			frameHost.url = null;
+			frameHost.loadedUrl = null;
+			return el;
+		}
 
 		/**
-		 * 把 Semantica 的 Explorer 界面装进一个 iframe，自带加载遮罩。
+		 * 让宿主的 iframe 指向 url。
 		 *
-		 * 控制面板用它把「工具栏 + 图」拼成同一个页面 —— 以前这是两个标签页，
-		 * 用户得先看信息页、再手动点开图。
+		 * **只在 url 真的变了时才换 iframe** —— 换一次就是一次完整重载。
 		 *
-		 * iframe 的 `key` 就是 url：换会话时 url 变了就重挂载。
-		 * Explorer 是个 SPA，从外部没法调它的路由，只能整块重来。
-		 * 重挂载后 onLoad 会再触发一次，所以加载遮罩也要跟着复位。
+		 * @param onLoad 加载完成回调。它会被记进 frameHost，让**后挂载**的组件也能知道
+		 *   「这个 url 早就加载好了」；否则切回来会一直卡在加载遮罩上（不会再触发 load）。
+		 */
+		function pointFrameHostAt(url, onLoad) {
+			frameHost.onLoad = onLoad;
+			if (frameHost.url === url && frameHost.iframe) return;
+			const host = ensureFrameHost();
+			if (frameHost.iframe) frameHost.iframe.remove();
+			const f = document.createElement("iframe");
+			f.setAttribute("title", T("tab.title"));
+			f.setAttribute("sandbox", EXPLORER_IFRAME_SANDBOX);
+			f.setAttribute("referrerpolicy", "no-referrer");
+			f.addEventListener("load", () => {
+				frameHost.loadedUrl = url;
+				if (typeof frameHost.onLoad === "function") frameHost.onLoad();
+			});
+			f.src = url;
+			host.appendChild(f);
+			frameHost.iframe = f;
+			frameHost.url = url;
+			frameHost.loadedUrl = null;
+		}
+
+		/** 隐藏宿主。离开图谱标签时**必须**调到，否则这块 fixed 会盖住别的界面。 */
+		function hideFrameHost() {
+			if (frameHost.el) frameHost.el.style.display = "none";
+		}
+
+		/** 把宿主摆到占位元素的矩形上。宿主自带 16px 内边距，就是 iframe 四周的留白。 */
+		function syncFrameHostRect(placeholder) {
+			const host = frameHost.el;
+			if (!host || !placeholder) return;
+			const r = placeholder.getBoundingClientRect();
+			if (r.width < 1 || r.height < 1) {
+				hideFrameHost();
+				return;
+			}
+			host.style.display = "block";
+			host.style.left = Math.round(r.left) + "px";
+			host.style.top = Math.round(r.top) + "px";
+			host.style.width = Math.round(r.width) + "px";
+			host.style.height = Math.round(r.height) + "px";
+		}
+
+		/**
+		 * 图谱视图是个整屏画布，下面压着的那条对话输入框既用不上、又吃掉一百多像素。
+		 * 挂载时给滚动容器打个标记，由 CSS 隐藏输入框：
+		 *   `[data-semg-hide-composer] [data-composer-seat]{display:none}`
+		 *
+		 * 用 `data-composer-seat` 这个**稳定属性**定位（它在 ConversationRoot 的 JSX 里
+		 * 是显式写死的），不用哈希类名 —— 那是 module CSS 生成的，DSH 一升级就变。
+		 *
+		 * 用 display:none 而不是卸载它：输入框连同草稿一起留着，切回「对话」标签草稿还在。
+		 * 核心自己也有类似先例：`[data-phase=settling] .composerSeat{visibility:hidden}`。
+		 */
+		function setComposerHidden(hidden) {
+			try {
+				// 从我们自己这个槽的锚点往上找对话的滚动容器。用 `data-slot` 定位
+				// （槽名是稳定的、核心自己的 CSS 也在用），不猜类名。
+				const anchor = document.querySelector('[data-slot="conversation.view"]');
+				const scroll =
+					anchor && typeof anchor.closest === "function"
+						? anchor.closest("[data-conversation-scroll]")
+						: null;
+				if (!scroll) return false;
+				if (hidden) scroll.setAttribute("data-semg-hide-composer", "");
+				else scroll.removeAttribute("data-semg-hide-composer");
+				return true;
+			} catch {
+				return false;
+			}
+		}
+
+		/**
+		 * 图谱画布的占位元素 —— 真正渲染 iframe 的是 frameHost，这里只报告自己占哪儿。
+		 *
+		 * 组件卸载时 iframe **不动**（还在宿主里），只把宿主藏起来，所以切标签回来是
+		 * 秒开、不会重载。
 		 *
 		 * @param props.url  Explorer 基址（空串则不渲染）
 		 */
 		function ExplorerFrame(props) {
 			const url = props.url || "";
-			const [loaded, setLoaded] = useState(false);
+			// 已经加载过的 url 直接算「加载好了」，否则切回来会卡在遮罩上
+			// （复用的 iframe 不会再触发一次 load 事件）。
+			const [loaded, setLoaded] = useState(() => Boolean(url) && frameHost.loadedUrl === url);
+			const holder = useRef(null);
 
-			// url 变了就把遮罩放回去，否则会一直显示上一张图
 			useEffect(() => {
-				setLoaded(false);
+				const node = holder.current;
+				if (!url || !node) {
+					hideFrameHost();
+					return;
+				}
+				pointFrameHostAt(url, () => setLoaded(true));
+				syncFrameHostRect(node);
+
+				// 位置跟着占位元素走。ResizeObserver 抓尺寸变化（工具栏换行、窗口变化），
+				// resize/scroll 兜住 observer 覆盖不到的位移（比如对话区滚动）。
+				let ro = null;
+				try {
+					if (typeof ResizeObserver === "function") {
+						ro = new ResizeObserver(() => syncFrameHostRect(node));
+						ro.observe(node);
+					}
+				} catch {
+					ro = null;
+				}
+				const follow = () => syncFrameHostRect(node);
+				window.addEventListener("resize", follow);
+				window.addEventListener("scroll", follow, true);
+
+				return () => {
+					if (ro) {
+						try {
+							ro.disconnect();
+						} catch {
+							/* ignore */
+						}
+					}
+					window.removeEventListener("resize", follow);
+					window.removeEventListener("scroll", follow, true);
+					frameHost.onLoad = null;
+					hideFrameHost();
+				};
 			}, [url]);
 
 			return h(
@@ -934,17 +1162,10 @@ const CSS = `
 							h("div", { className: "semg-spin" }),
 							h("span", null, T("state.loading")),
 						),
-				h("iframe", {
-					key: url,
-					src: url,
-					title: T("tab.title"),
-					sandbox: EXPLORER_IFRAME_SANDBOX,
-					referrerPolicy: "no-referrer",
-					onLoad: () => setLoaded(true),
-				}),
+				// iframe 不在这里 —— 它在 frameHost 里，这里只是它要覆盖的占位。
+				h("div", { ref: holder, className: "semg-viewholder" }),
 			);
 		}
-
 
 		// ───────────────────────────── apply ─────────────────────────────
 

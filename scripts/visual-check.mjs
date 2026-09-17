@@ -94,7 +94,25 @@ mkdirSync(OUT, { recursive: true })
 // `navigator.clipboard` 只在**安全上下文**里存在，而 setContent 出来的页面是
 // about:blank，不是安全上下文。那样测出来的是"clipboard 是 undefined"，
 // 而真实 GUI 跑在 http://127.0.0.1:<port>，本来就有这个 API。
-const server = createServer((_req, res) => {
+let frameHits = 0
+const server = createServer((req, res) => {
+	// `/frame` 是给 iframe 用的仿真 Explorer 页，里面挂一个 <img src="/hit">。
+	// **每次文档加载**都会重新请求一次 /hit，所以服务端这个计数就是「iframe 重载了几次」
+	// —— 比在页面里数 load 事件更硬：完全不依赖被测代码，也不依赖页面 JS。
+	if (req.url === '/hit') {
+		frameHits++
+		res.writeHead(204)
+		res.end()
+		return
+	}
+	if (req.url === '/frame') {
+		res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+		res.end(
+			'<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;background:#0a0">' +
+				'<img src="/hit" width="1" height="1" alt="">Explorer 仿真页</body></html>',
+		)
+		return
+	}
 	res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
 	res.end(
 		'<!doctype html><html><head><meta charset="utf-8"><style>body{margin:0;background:#f6f7f9;font-family:-apple-system,"PingFang SC",sans-serif}</style></head><body><div id="host"></div></body></html>',
@@ -184,7 +202,9 @@ const renderPanel = async ({ width, explorer, stats, stale = false }) =>
 			const acts = q('.semg-toolbar-actions')
 			const util = q('.semg-toolbar-util')
 			const frame = q('.semg-viewbody')
-			const iframe = frame && frame.querySelector('iframe')
+			// iframe **不在面板里**了 —— 它常驻 body 上的 [data-semg-frame-host]，
+			// 靠 fixed 跟着 .semg-viewbody 里的占位元素走（见 ExplorerFrame 的注释）
+			const iframe = document.querySelector('[data-semg-frame-host] iframe')
 			// 真重叠：两个盒子的 x 和 y 区间**都**相交（只比 x 会把不同行误判成重叠）
 			let overlap = false
 			if (info && acts) {
@@ -207,6 +227,7 @@ const renderPanel = async ({ width, explorer, stats, stale = false }) =>
 				chipT: chip ? Math.round(chip.getBoundingClientRect().top) : 0,
 				chipH: chip ? Math.round(chip.getBoundingClientRect().height) : 0,
 				chipOverflowX: chip ? chip.scrollWidth - chip.clientWidth : 0,
+				panelW: Math.round(panel.getBoundingClientRect().width),
 				overflowX: toolbar ? toolbar.scrollWidth - toolbar.clientWidth : 0,
 				frame: rel(frame),
 				iframe: rel(iframe),
@@ -238,6 +259,183 @@ const renderPanel = async ({ width, explorer, stats, stale = false }) =>
 		},
 		{ width, explorer: EXPLORER, stats: STATS, stale },
 	)
+
+// ═══════════ 图谱标签的三个真实行为（真 DOM 才能验）═══════════
+//
+// 这一段放在宽度扫描**之前**：扫描会连续挂载 6 个面板且从不卸载，那些残留组件的
+// ResizeObserver 会跟这里的宿主抢位置。先测、后扫描。
+console.log('── 图谱标签：iframe 不重载 / 隐藏输入框 / 卡片样式')
+{
+	const FRAME_URL = `http://127.0.0.1:${PORT}/frame`
+	const before = frameHits
+	const r = await page.evaluate(
+		async ({ url, stats }) => {
+			// ── 仿真的对话骨架 ──
+			// scrollBody > [conversation.session] > [slot=conversation.view](面板)
+			//            > [data-composer-seat]（输入框）
+			// 结构照 ConversationRoot 的真实 DOM 来：data-conversation-scroll /
+			// data-slot / data-composer-seat 都是它显式写死的稳定属性。
+			const host = document.getElementById('host')
+			host.innerHTML = ''
+			const stale = document.querySelector('[data-semg-frame-host]')
+			if (stale) stale.remove()
+
+			const scroll = document.createElement('div')
+			scroll.setAttribute('data-conversation-scroll', '')
+			scroll.style.cssText =
+				'position:relative;display:flex;flex-direction:column;width:1000px;height:720px;background:#fff;overflow:hidden'
+			const sessionSlot = document.createElement('div')
+			sessionSlot.setAttribute('data-slot', 'conversation.session')
+			sessionSlot.style.cssText = 'flex:1 1 auto;min-height:0;display:flex;flex-direction:column'
+			const viewSlot = document.createElement('div')
+			viewSlot.setAttribute('data-slot', 'conversation.view')
+			viewSlot.style.cssText = 'flex:1 1 auto;min-height:0;display:flex;flex-direction:column'
+			const seat = document.createElement('div')
+			seat.setAttribute('data-composer-seat', '')
+			// 刻意**不写内联 display**：真实里输入框的 display 来自 module CSS 的类，
+			// 内联样式会压过插件那条属性选择器规则，测出来的是假失败。
+			seat.style.cssText = 'height:120px;flex:none;background:#dde'
+			seat.textContent = '对话输入框'
+			const panel = document.createElement('div')
+			panel.style.cssText = 'flex:1 1 auto;min-height:0;display:flex;flex-direction:column'
+			viewSlot.appendChild(panel)
+			sessionSlot.appendChild(viewSlot)
+			scroll.appendChild(sessionSlot)
+			scroll.appendChild(seat)
+			host.appendChild(scroll)
+
+			const mod = window.__plugin.factory((n) => {
+				if (n === 'react') return React
+				throw new Error(`意外的 require("${n}")`)
+			})
+			const ctx = {
+				get: (k) =>
+					k === 'sessions' ? { open: () => {} }
+					: k === 'locale' ? { getLocale: () => ({ active: 'zh-CN', locales: [], revision: 1 }) }
+					: undefined,
+				on: () => {},
+				effect: (fn) => fn(),
+				slots: {
+					inject: (_n, cb) => cb(),
+					register: (desc, comp) => {
+						if (desc.name === 'conversation.view') window.__panelComp = comp
+						return () => {}
+					},
+				},
+				inject: (deps, cb) => cb({ get: (k) => (deps.includes(k) ? ctx.get(k) : undefined) }),
+			}
+			window.fetch = async () => ({
+				status: 200, ok: true,
+				text: async () => JSON.stringify({ ok: true, url, cached: false, stale: false, drillable: true, stats }),
+			})
+			mod.apply(ctx)
+
+			const wait = (ms) => new Promise((res) => setTimeout(res, ms))
+			const hostEl = () => document.querySelector('[data-semg-frame-host]')
+			const box = (el) => {
+				if (!el) return null
+				const b = el.getBoundingClientRect()
+				return { l: Math.round(b.left), t: Math.round(b.top), w: Math.round(b.width), h: Math.round(b.height) }
+			}
+			const snap = () => {
+				const fh = hostEl()
+				const f = fh && fh.querySelector('iframe')
+				const holder = document.querySelector('.semg-viewholder')
+				const cs = f ? getComputedStyle(f) : null
+				const hs = fh ? getComputedStyle(fh) : null
+				return {
+					seatDisplay: getComputedStyle(seat).display,
+					hostDisplay: fh ? hs.display : null,
+					hostPadTop: hs ? hs.paddingTop : null,
+					hostPadLeft: hs ? hs.paddingLeft : null,
+					radius: cs ? cs.borderTopLeftRadius : null,
+					borderW: cs ? cs.borderTopWidth : null,
+					src: f ? f.src : null,
+					status: f ? f.getAttribute('sandbox') : null,
+					ref: f ? f.getAttribute('referrerpolicy') : null,
+					host: box(fh),
+					holder: box(holder),
+					iframe: box(f),
+				}
+			}
+
+			// ── 第一次挂载 ──
+			const root = ReactDOM.createRoot(panel)
+			root.render(React.createElement(window.__panelComp, { sessionId: 'sess-persist' }))
+			await wait(2600)
+			const mounted = snap()
+			const firstFrame = hostEl() && hostEl().querySelector('iframe')
+
+			// ── 卸载（= 切到别的标签）──
+			root.unmount()
+			await wait(400)
+			const unmounted = snap()
+
+			// ── 再挂载（= 切回图谱标签）──
+			const root2 = ReactDOM.createRoot(panel)
+			root2.render(React.createElement(window.__panelComp, { sessionId: 'sess-persist' }))
+			await wait(2600)
+			const remounted = snap()
+			const secondFrame = hostEl() && hostEl().querySelector('iframe')
+
+			return {
+				mounted,
+				unmounted,
+				remounted,
+				sameFrame: Boolean(firstFrame) && firstFrame === secondFrame,
+				frameExists: Boolean(firstFrame),
+			}
+		},
+		{ url: FRAME_URL, stats: STATS },
+	)
+	const hits = frameHits - before
+
+	// ── iframe 没有重载（主人反馈的第 2 条）──
+	//
+	// 这是整段里最硬的一条：服务端数的是**文档加载次数**，卸载再挂载一次之后
+	// 必须仍然是 1。要是 iframe 被重建，这个数会变成 2，Explorer 的 SPA 也就
+	// 得从头启动一次 —— 那正是「每次切 tab 都在提取」的来源。
+	check('iframe 建出来了', r.frameExists)
+	check('切走再切回来，iframe 是**同一个元素**（没重建）', r.sameFrame)
+	check('服务端只收到 1 次文档加载（真的没重载）', hits === 1, `hits=${hits}`)
+
+	// ── 隐藏输入框（第 1 条）──
+	check('挂载时隐藏了对话输入框', r.mounted.seatDisplay === 'none', `display=${r.mounted.seatDisplay}`)
+	check('卸载后输入框恢复', r.unmounted.seatDisplay !== 'none', `display=${r.unmounted.seatDisplay}`)
+	check('切回来又藏起来', r.remounted.seatDisplay === 'none', `display=${r.remounted.seatDisplay}`)
+
+	// ── 离开标签时宿主必须隐藏（否则这块 fixed 会盖住别的界面）──
+	check('挂载时宿主显示', r.mounted.hostDisplay === 'block', `display=${r.mounted.hostDisplay}`)
+	check('卸载后宿主隐藏（不盖住别的界面）', r.unmounted.hostDisplay === 'none', `display=${r.unmounted.hostDisplay}`)
+
+	// ── 卡片样式（第 3 条）──
+	check('iframe 四周 16px 内边距', r.mounted.hostPadTop === '16px' && r.mounted.hostPadLeft === '16px',
+		`${r.mounted.hostPadTop} / ${r.mounted.hostPadLeft}`)
+	check('iframe 8px 圆角', r.mounted.radius === '8px', String(r.mounted.radius))
+	check('iframe 1px 边框', r.mounted.borderW === '1px', String(r.mounted.borderW))
+	check('iframe 指向 Explorer 地址', r.mounted.src === FRAME_URL, String(r.mounted.src))
+	check('卸载后 iframe 仍然指着同一地址（没被清空）', r.unmounted.src === FRAME_URL, String(r.unmounted.src))
+
+	// ── 宿主摆位：跟占位元素对齐、向外 16px ──
+	check('宿主盖住画布占位元素', !!r.mounted.host && !!r.mounted.holder &&
+		Math.abs(r.mounted.host.l - r.mounted.holder.l) <= 1 &&
+		Math.abs(r.mounted.host.t - r.mounted.holder.t) <= 1 &&
+		Math.abs(r.mounted.host.w - r.mounted.holder.w) <= 1 &&
+		Math.abs(r.mounted.host.h - r.mounted.holder.h) <= 1,
+		`host=${JSON.stringify(r.mounted.host)} holder=${JSON.stringify(r.mounted.holder)}`)
+	check('iframe 在宿主里向内收 16px', !!r.mounted.host && !!r.mounted.iframe &&
+		r.mounted.iframe.l === r.mounted.host.l + 16 && r.mounted.iframe.t === r.mounted.host.t + 16 &&
+		r.mounted.iframe.w === r.mounted.host.w - 32 && r.mounted.iframe.h === r.mounted.host.h - 32,
+		`host=${JSON.stringify(r.mounted.host)} iframe=${JSON.stringify(r.mounted.iframe)}`)
+
+	// sandbox 是安全边界，别在重构里悄悄丢
+	const sb = String(r.mounted.status || '')
+	check('sandbox 仍含 allow-same-origin（缺它 SPA 白屏）', sb.includes('allow-same-origin'), sb)
+	check('sandbox 仍含 allow-scripts', sb.includes('allow-scripts'), sb)
+	check('sandbox 不含 allow-top-navigation', !sb.includes('allow-top-navigation'), sb)
+	check('referrerpolicy 仍是 no-referrer', r.mounted.ref === 'no-referrer', String(r.mounted.ref))
+	console.log('')
+}
 
 for (const width of WIDTHS) {
 	const r = await renderPanel({ width, explorer: EXPLORER, stats: STATS })
@@ -280,8 +478,8 @@ for (const width of WIDTHS) {
 	}
 	check(
 		'控制按钮贴着右边缘（margin-left:auto）',
-		!!r.util && r.util.l + r.util.w >= (r.frame ? r.frame.w : 0) - 12,
-		`util右缘 ${r.util && r.util.l + r.util.w} vs 面板宽 ${r.frame && r.frame.w}`,
+		!!r.util && r.util.l + r.util.w >= r.panelW - 12,
+		`util右缘 ${r.util && r.util.l + r.util.w} vs 面板宽 ${r.panelW}`,
 	)
 	// 第一行只剩信息，必须在按钮行上方
 	check(
@@ -290,7 +488,9 @@ for (const width of WIDTHS) {
 		`info底 ${r.info && r.info.t + r.info.h} vs acts顶 ${r.acts && r.acts.t}`,
 	)
 	check('工具栏 + 图区 = 面板高度', r.toolbarH + (r.frame ? r.frame.h : 0) >= 719, `${r.toolbarH} + ${r.frame ? r.frame.h : 0}`)
-	check('渲染出内嵌 iframe', !!r.iframe)
+	// 画布区铺满面板宽：宿主那 16px 内边距才是「iframe 到对话视图区边缘」的真实距离
+	check('画布区铺满面板宽', !!r.frame && Math.abs(r.frame.w - r.panelW) <= 1, `frame.w=${r.frame && r.frame.w} panelW=${r.panelW}`)
+	check('渲染出内嵌 iframe（在常驻宿主里）', !!r.iframe, String(r.iframe && r.iframe.src))
 	check('统计四项齐全', r.stats.length === 4, r.stats.join(' '))
 	check('分析按钮四个齐全', r.buttons.length === 4, r.buttons.join(' | '))
 	check('图文件路径 chip 渲染出来了', typeof r.chipText === 'string' && r.chipText.length > 0)

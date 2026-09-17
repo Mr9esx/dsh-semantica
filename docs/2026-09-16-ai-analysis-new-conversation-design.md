@@ -475,6 +475,31 @@ Explorer 自愈（它闲置约 10 分钟会自己死）。现在切走就卸载�
 `display:flex; flex-direction:column; flex:1; min-height:0`）的直接 flex item，
 `flex:1 1 auto` 就能铺满，不依赖父元素有确定高度。
 
+### 6.7 搬到标签栏之后暴露的三个问题（2026-09 二次修正）
+
+搬进对话标签栏解决了「没有 better-sidebar 就没有入口」的问题，但暴露了三件事：
+
+1. **下面压着对话输入框。** 整屏画布下面那条输入框既用不上、又吃掉一百多像素。
+   修法：挂载时给滚动容器打 `data-semg-hide-composer`，由 CSS 隐藏
+   `[data-composer-seat]`。用稳定属性定位，不用哈希类名；用 `display:none` 而不是
+   卸载，草稿得以保留。
+
+2. **每次切 tab 都在「提取」。** 槽对非激活视图是 `filter` 掉的，切走真的卸载组件，
+   于是 iframe 被销毁、`stats`/`url` 状态全丢。宿主那边其实有缓存、不会真重抽
+   （`if (!refresh && live)` 直接复用），但客户端这一下照样白屏 → 看起来就像在提取。
+   修法两层：
+   - iframe 常驻 `body` 上的宿主，**活过卸载**（实测：搬动 iframe 会重载，
+     只改宿主 CSS 不会），所以 Explorer SPA 不用重启；
+   - prepare 结果按会话缓存在组件外，切回来直接有画面、连请求都不发。
+   自愈改由「缓存超过 20s 后的静默复查」兜底。
+
+3. **画布没有卡片感。** 加上 16px 留白 + 8px 圆角 + 1px 边框。这一条顺手暴露了一个
+   自己的错误：为了让那 16px 是「真实留白」而给 `.semg-viewbody` 加的负 margin，
+   抵消的是**另一个状态**的 padding，反而把画布推出容器外被裁掉。
+
+三件事都补了真 DOM 的验证（`scripts/visual-check.mjs`）。其中最硬的一条是
+**服务端计数 iframe 的文档加载次数**：卸载再挂载之后必须仍然是 1 次。
+
 ### 7. digest 的结构
 
 `buildDigest()` 纯函数，约 6-7KB（≈2600 token）：

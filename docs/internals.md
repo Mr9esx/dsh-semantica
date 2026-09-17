@@ -276,6 +276,68 @@ DOM 上也没有 `data-id`），只能按标签文字找按钮再 `click()` —�
 
 这两个按钮都**带文字**而不是纯图标。曾经这里是 `↻` `⤢` `↗` 三个纯图标 + hover 提示，主人试用后的第一反应是「这两个按钮是干嘛用的」—— 需要悬停才知道是什么的图标，等于没有标注。后来 `⤢` 和 `↻` 直接删了（见下），留下的那个改成了「方框 + 外射箭头」的通用外链画法并配上文字。
 
+### iframe 必须活过组件卸载（这一节是实测出来的，不是设计的）
+
+`conversation.view` 槽对非激活视图是**过滤掉**的（renderer 里就是
+`list.filter(item => item.id === opts.only)`），所以切走标签会真的卸载我们的组件 ——
+连带销毁里面的 iframe。Explorer 是个 SPA，每次重载都要从头启动，用户看到的就是
+「每次切 tab 都在提取」。
+
+两条路都实测过，第一条是死的（`/tmp` 里的 playwright 实验，判据是页面加载次数）：
+
+| 做法 | 结果 |
+| --- | --- |
+| 卸载前把 iframe 抢救到游离容器、回来再 `appendChild` 搬回去 | ✗ **会重载**。搬 4 次 = 加载 5 次：iframe 一旦脱离文档，浏览上下文就被丢弃了 |
+| iframe 从头到尾待在同一个父节点，宿主挂 `body` 上、只改 CSS | ✓ 只改宿主的 display（含 `none`↔`block`）、visibility、尺寸，累计加载**恒为 1 次** |
+
+所以宿主 `[data-semg-frame-host]` 常驻 `document.body`（不随视图卸载），靠
+`position:fixed` 摆到 `.semg-viewbody` 里那个占位元素的位置上，位置由
+`ResizeObserver` + `resize`/`scroll` 同步。没用 `createPortal` —— 客户端半侧只能
+`require("react")`，拿不到 react-dom。
+
+代价与配套约束：
+
+- **离开标签时必须隐藏宿主**（卸载的 cleanup 里 `display:none`），否则这块 fixed
+  会盖住别的界面。`visual-check` 里专门断言了卸载后是 `none`。
+- 后台那个 iframe 会一直活着（内存/CPU 都还在），这正是「切回来秒开」的代价。
+- Explorer 闲置约 10 分钟会死，此时旧 url 指向一个空端口。兜底是缓存超过
+  `REVALIDATE_AFTER_MS`（20s）后的**静默复查**：宿主发现 worker 没了会重拉、返回新
+  url，`pointFrameHostAt` 换掉 iframe 自愈。旧图在换掉之前一直留着，所以不闪。
+
+对应地，prepare 结果按会话缓存在**组件外**（`preparedBySession`，活过卸载），
+所以切回来是立刻有画面、连请求都不发。`visual-check` 用**服务端计数的文档加载次数**
+来证明这件事（比在页面里数 load 事件硬：完全不依赖被测代码）。
+
+### 图谱标签下隐藏对话输入框
+
+图谱是整屏画布，下面压着的输入框既用不上又吃掉一百多像素。挂载时给滚动容器打个标记，
+由 CSS 隐藏它：
+
+```css
+[data-semg-hide-composer] [data-composer-seat]{display:none}
+```
+
+用 `data-composer-seat` 这个**稳定属性**定位 —— 它在 `ConversationRoot` 的 JSX 里是
+显式写死的（`<div className={composerSeat} data-composer-seat="" />`），而哈希类名
+（`Sbj43W_composerSeat`）是 module CSS 生成的，DSH 一升级就变。根节点的
+`data-phase`、滚动容器的 `data-conversation-scroll`、槽锚点的 `data-slot` 同理。
+
+用 `display:none` 而不是卸载它：输入框连同**草稿**一起留着，切回「对话」标签草稿还在。
+核心自己也有类似先例（`[data-phase=settling] .composerSeat{visibility:hidden}`）。
+
+### 画布卡片：16px 留白是怎么来的
+
+宿主自带 `padding:16px`，这就是 iframe 到对话视图区边缘的**真实**留白。它成立的前提是
+就绪态的根节点 `.semg-split` 自己没有 padding（它确实没有）。
+
+踩过的坑：一开始给 `.semg-viewbody` 写了 `margin:0 -14px -14px` 去「抵消面板的
+padding」—— 那 14px 其实是**另一个状态**（`.semg-panel`，忙碌页/出错页）的样式，
+就绪态根本没有。结果把画布推出容器外 14px（量出来 `l=-14 w=1028`），`overflow:auto`
+再把它裁掉，实际只剩约 2px 留白。去掉负 margin 后 `viewbody` 与容器同为 0..1000。
+
+iframe 还必须显式 `box-sizing:border-box`：否则那条 1px 边框会加在 `width:100%`
+之外，四周各多 1px（量出来差 2px，就是这么来的）。
+
 ### 布局演进（两次返工）
 
 **第一版**：控制面板和信息页是两个标签。点按钮 → 看到信息 → 再手动点「打开完整 Explorer」才看到图。反馈是「太粗暴了，为什么不能套 iframe，上面做个工具栏」。信息和图本来就该一起看。
