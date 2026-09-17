@@ -45,7 +45,18 @@ const STATS = {
 }
 
 // 侧边栏实际可能的宽度区间
-const WIDTHS = [300, 320, 420, 520, 640, 720]
+// 600 单列出来：那是插件自动加宽后的真实面板宽度（better-sidebar 出厂是 483）。
+const WIDTHS = [300, 320, 420, 520, 600, 640, 720]
+/** 两组按钮能排在同一行所需的最小宽度（实测：600 同行、520 换行）。 */
+const SAME_ROW_MIN = 600
+/**
+ * 路径 chip 能和统计数字同处第一行的最小宽度（实测：640 同行、600 换行）。
+ *
+ * 这个数比 SAME_ROW_MIN 更值钱：chip 一旦换行，info 从 17px 涨到 43px，
+ * 工具栏跟着从 68px 涨到 94px —— 26px 的图区高度。（600px 正好落在换行那一侧，
+ * 而插件默认就把面板加宽到 600，所以这个边界直接决定用户看到的是 68 还是 94。）
+ */
+const CHIP_ONE_LINE_MIN = 640
 
 // PathChip 的 title 是「提示语 + 换行 + 完整路径」
 const TIP = '点击复制完整路径（这张图落盘的 JSON 文件）\n'
@@ -174,6 +185,7 @@ const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
 			const toolbar = q('.semg-toolbar')
 			const info = q('.semg-toolbar-info')
 			const acts = q('.semg-toolbar-actions')
+			const util = q('.semg-toolbar-util')
 			const frame = q('.semg-viewbody')
 			const iframe = frame && frame.querySelector('iframe')
 			// 真重叠：两个盒子的 x 和 y 区间**都**相交（只比 x 会把不同行误判成重叠）
@@ -182,10 +194,34 @@ const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
 				const i = rel(info), a = rel(acts)
 				overlap = i.t < a.t + a.h - 1 && a.t < i.t + i.h - 1 && i.l < a.l + a.w - 1 && a.l < i.l + i.w - 1
 			}
-			// 路径 chip：显示值应是省略形式，title 和剪贴板里应是完整值
+			// 路径 chip：点击**之前**先把它量完。
+			//
+			// 这个顺序是有教训的：chip 点下去会把文案换成「已复制」，宽度从 359px
+			// 缩到 62px，于是整行不再换行、工具栏也跟着矮一截。一开始点击在量几何
+			// 之前，量到的全是被点击后的尺寸 —— 报出去的工具栏高度全部是错的。
+			// 所以：几何先量、存进 geom，复制测试放到最后。
 			const chip = q('.semg-path')
 			const chipText = chip ? (chip.querySelector('code') || {}).textContent || '' : null
 			const chipTitle = chip ? chip.getAttribute('title') || '' : null
+			const geom = {
+				widthWrites: widthWrites.map((st) => st.width),
+				viewportW: window.innerWidth,
+				toolbarH: toolbar ? Math.round(toolbar.getBoundingClientRect().height) : 0,
+				chipW: chip ? Math.round(chip.getBoundingClientRect().width) : 0,
+				chipT: chip ? Math.round(chip.getBoundingClientRect().top) : 0,
+				chipOverflowX: chip ? chip.scrollWidth - chip.clientWidth : 0,
+				overflowX: toolbar ? toolbar.scrollWidth - toolbar.clientWidth : 0,
+				frame: rel(frame),
+				iframe: rel(iframe),
+				info: rel(info),
+				acts: rel(acts),
+				util: rel(util),
+				stats: [...panel.querySelectorAll('.semg-mini')].map((s) => s.textContent.trim()),
+				buttons: [...panel.querySelectorAll('.semg-toolbar-actions .semg-btn')].map((b) => b.textContent.trim()),
+				overlap,
+			}
+
+			// 量完了，再点 chip 验复制。这里会改状态，所以之后不能再量几何。
 			let chipCopied = null
 			if (chip) {
 				chip.click()
@@ -198,22 +234,7 @@ const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
 			}
 			const chipLabelAfter = chip ? (chip.querySelector('code') || {}).textContent || '' : null
 
-			return {
-				widthWrites: widthWrites.map((st) => st.width),
-				viewportW: window.innerWidth,
-				toolbarH: toolbar ? Math.round(toolbar.getBoundingClientRect().height) : 0,
-				chipText,
-				chipTitle,
-				chipCopied,
-				chipLabelAfter,
-				chipOverflowX: chip ? chip.scrollWidth - chip.clientWidth : 0,
-				overflowX: toolbar ? toolbar.scrollWidth - toolbar.clientWidth : 0,
-				frame: rel(frame),
-				iframe: rel(iframe),
-				stats: [...panel.querySelectorAll('.semg-mini')].map((s) => s.textContent.trim()),
-				buttons: [...panel.querySelectorAll('.semg-toolbar-actions .semg-btn')].map((b) => b.textContent.trim()),
-				overlap,
-			}
+			return { ...geom, chipText, chipTitle, chipCopied, chipLabelAfter }
 		},
 		{ width, explorer: EXPLORER, stats: STATS, seedWidth },
 	)
@@ -221,8 +242,56 @@ const renderPanel = async ({ width, explorer, stats, seedWidth }) =>
 for (const width of WIDTHS) {
 	const r = await renderPanel({ width, explorer: EXPLORER, stats: STATS, seedWidth: SEED_WIDTH_NARROW })
 	console.log(`── ${width}px  工具栏高 ${r.toolbarH}  图区 ${r.frame ? `${r.frame.w}×${r.frame.h}` : '—'}`)
+	console.log(`     信息 y${r.info && r.info.t} h${r.info && r.info.h} | 分析 y${r.acts && r.acts.t} x${r.acts && r.acts.l}~${r.acts && r.acts.l + r.acts.w} | 控制 y${r.util && r.util.t} x${r.util && r.util.l}~${r.util && r.util.l + r.util.w} | chip w${r.chipW} y${r.chipT}`)
 	check('没有横向溢出', r.overflowX === 0, `溢出 ${r.overflowX}px`)
 	check('信息区与按钮组不重叠', r.overlap === false)
+	// 第二行：分析按钮靠左、控制按钮靠右。
+	// 宽度够时两组同一行；不够时控制按钮换到下一行 —— 但**永远不能跑到分析按钮上方**，
+	// 否则「下面那行」这个约定就破了。
+	check(
+		'控制按钮不在分析按钮上方',
+		!!r.util && !!r.acts && r.util.t >= r.acts.t - 2,
+		`acts.t=${r.acts && r.acts.t} util.t=${r.util && r.util.t}`,
+	)
+	check(
+		'控制按钮在分析按钮右边',
+		!!r.util && !!r.acts && r.util.l > r.acts.l,
+		`acts.l=${r.acts && r.acts.l} util.l=${r.util && r.util.l}`,
+	)
+	if (width >= SAME_ROW_MIN) {
+		check(
+			'够宽时两组排在同一行',
+			Math.abs(r.util.t - r.acts.t) <= 2,
+			`acts.t=${r.acts.t} util.t=${r.util.t}`,
+		)
+	}
+	// 路径 chip 的行位：够宽时和统计数字同一行，不够时换到第二行。
+	// 直接断言「chip 顶 == info 顶」比断言高度稳 —— 高度还受字体影响。
+	if (width >= CHIP_ONE_LINE_MIN) {
+		check(
+			'够宽时路径 chip 和统计同处第一行',
+			r.chipT - r.info.t <= 2,
+			`chip.t=${r.chipT} info.t=${r.info.t}`,
+		)
+		check('chip 不换行时 info 只有一行高', r.info.h < 25, `info.h=${r.info.h}`)
+	} else {
+		check(
+			'不够宽时路径 chip 换到第二行',
+			r.chipT - r.info.t > 2,
+			`chip.t=${r.chipT} info.t=${r.info.t}`,
+		)
+	}
+	check(
+		'控制按钮贴着右边缘（margin-left:auto）',
+		!!r.util && r.util.l + r.util.w >= (r.frame ? r.frame.w : 0) - 12,
+		`util右缘 ${r.util && r.util.l + r.util.w} vs 面板宽 ${r.frame && r.frame.w}`,
+	)
+	// 第一行只剩信息，必须在按钮行上方
+	check(
+		'第一行（信息）在第二行（按钮）上方',
+		!!r.info && !!r.acts && r.info.t + r.info.h <= r.acts.t + 1,
+		`info底 ${r.info && r.info.t + r.info.h} vs acts顶 ${r.acts && r.acts.t}`,
+	)
 	check('工具栏 + 图区 = 面板高度', r.toolbarH + (r.frame ? r.frame.h : 0) >= 719, `${r.toolbarH} + ${r.frame ? r.frame.h : 0}`)
 	check('渲染出内嵌 iframe', !!r.iframe)
 	check('统计四项齐全', r.stats.length === 4, r.stats.join(' '))

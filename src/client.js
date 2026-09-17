@@ -84,7 +84,7 @@ window.__ModuleLoader__.load({
 			"path.copied": "已复制",
 			"path.failed": "复制失败，请手动选中",
 			"action.dismiss": "关掉这条提示",
-			"state.emptyHint": "还没有图。点右边的「重新抽取」开始。",
+			"state.emptyHint": "还没有图。点下面的「重新抽取」开始。",
 			"action.reload": "刷新",
 			"action.external": "在浏览器打开",
 			"state.loading": "正在载入 Explorer…",
@@ -194,6 +194,8 @@ window.__ModuleLoader__.load({
 .semg-toolbar-util{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:0 0 auto;margin-left:auto}
 /* 这一行**必须**能收缩：flex-basis 取 auto 会让它按内容宽度（约 380px）撑开，
    于是内部的 flex-wrap 永远不触发，窄面板里直接横向溢出。 */
+/* 第二行：左边四个分析按钮，右边图谱/视图控制。 */
+.semg-toolbar-bottom{display:flex;align-items:center;gap:6px 12px;flex-wrap:wrap;min-width:0}
 .semg-toolbar-actions{display:flex;align-items:center;gap:6px;flex-wrap:wrap;flex:0 1 auto;min-width:0}
 .semg-mini{display:inline-flex;align-items:baseline;gap:3px;white-space:nowrap}
 .semg-mini b{font-weight:600;font-size:12px;font-variant-numeric:tabular-nums}
@@ -881,7 +883,8 @@ window.__ModuleLoader__.load({
 						"div",
 						{ className: "semg-toolbar-top" },
 
-						// 左：基本信息
+						// 第一行：只有基本信息。控制按钮全在第二行，所以这一行整行留给
+					// 统计数字和路径 chip（完整路径有 55 字符，之前和按钮抢宽度会换行）。
 						h(
 							"div",
 							{ className: "semg-toolbar-info", title: engineLine || undefined },
@@ -903,8 +906,36 @@ window.__ModuleLoader__.load({
 								? h(PathChip, { key: "path", path: stats.graphPath })
 								: null,
 						),
+					),
 
-						// 右：工具按钮。刷新保留文字（它是最常用的），其余收成图标 + title
+					// 第二行：左边四个分析按钮，右边图谱/视图控制。
+					// 两组都是「操作」，用右对齐而不是竖线分隔 —— 加线反而像两个区块。
+					h(
+						"div",
+						{ className: "semg-toolbar-bottom" },
+
+
+						// 四个分析按钮
+						h(
+							"div",
+							{ className: "semg-toolbar-actions" },
+							ANALYZE_KINDS.map(([kind, key]) =>
+								h(
+									"button",
+									{
+										key,
+										type: "button",
+										className: "semg-btn",
+										title: `${T(key)} — ${T("analyze.tip")}`,
+										disabled: busyKind !== null || phase === "working",
+										onClick: () => runAnalyze(kind),
+									},
+									busyKind === kind ? h("span", { className: "semg-spin semg-spin-sm" }) : T(key),
+								),
+							),
+						),
+
+						// 图谱/视图控制。刷新保留文字（它是最常用的），其余收成图标 + title
 						h(
 							"div",
 							{ className: "semg-toolbar-util" },
@@ -958,26 +989,6 @@ window.__ModuleLoader__.load({
 										"\u2197",
 									)
 								: null,
-						),
-					),
-
-					// 第二行：四个分析按钮
-					h(
-						"div",
-						{ className: "semg-toolbar-actions" },
-						ANALYZE_KINDS.map(([kind, key]) =>
-							h(
-								"button",
-								{
-									key,
-									type: "button",
-									className: "semg-btn",
-									title: `${T(key)} — ${T("analyze.tip")}`,
-									disabled: busyKind !== null || phase === "working",
-									onClick: () => runAnalyze(kind),
-								},
-								busyKind === kind ? h("span", { className: "semg-spin semg-spin-sm" }) : T(key),
-							),
 						),
 					),
 				),
